@@ -3,7 +3,9 @@ typer
 django
 tqdm
 toml
-openai
 python-dateutil
-ollama
 pydantic
+requests
+beautifulsoup4
+python-dotenv
+zulip

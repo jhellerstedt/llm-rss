@@ -1,2 +1,5 @@
 # Ignore all XML files
 *.xml
+
+.venv/
+*.pyc

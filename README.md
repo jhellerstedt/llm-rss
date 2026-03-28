@@ -2,64 +2,81 @@
 
 ## Introduction
 
-LLM-RSS is a tool that reads title and abstract from RSS sources like Nature, Arxiv, etc., filters them based on specific research areas or keywords provided by users, and then generates a new RSS feed in xml. Modify the prompt as needed. The generated xml file can then be hosted via nginx and accessed via Zotero, for example. Unlike keyword matching, LLM-RSS uses large language models (LLMs) to understand the content, providing a more contextually relevant feed.
+LLM-RSS reads titles and abstracts from science RSS feeds (Nature, arXiv, APS, and others), scores each item with **Kagi** (FastGPT API) against your research areas and optional **Zulip** discussion context, and writes filtered RSS XML you can host (for example with nginx) and subscribe to in Zotero.
 
 ## Installation
 
-To install and run LLM-RSS, follow these steps:
+1. **Clone the repository** and enter the project directory.
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/xsgeng/llm-rss.git
-   cd llm-rss
-   ```
+2. **Create a virtual environment** (recommended) and install dependencies:
 
-2. **Install the required dependencies:**
    ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
    pip install -r requirements.txt
    ```
 
-3. **Configure the project:**
-   - Copy the `config.d/comfig.toml.example` to `config.d/config.toml`.
-   - Modify the `config.toml` file to include your RSS feed URLs, research areas, and other settings.
-   - The program sequentially processes each toml file.
+3. **Configure Kagi**
+   - Create a [Kagi](https://kagi.com) account and open **Settings → Advanced → API portal** to generate an API token.
+   - Add **API credits** (FastGPT is billed per query; see [FastGPT API](https://help.kagi.com/kagi/api/fastgpt.html)).
+   - Set `KAGI_API_KEY` in the environment or put `api_key` under `[kagi]` in your TOML config.
+   - Requests use `Authorization: Bot <token>` against `https://kagi.com/api/v0/fastgpt` by default.
 
+4. **Configure the app**
+   - Copy [config.d/config.toml.example](config.d/config.toml.example) to `config.d/config.toml` and edit.
+   - Use `[[groups]]` for separate topical feeds (each group has its own `urls`, thresholds, and `rss_path`).
+   - With no `groups` key, a **legacy** single-group layout is still supported: top-level `urls`, `research_areas`, `excluded_areas`, and `rss_path`.
 
-## Supported RSS Providers
+5. **Optional: Zulip context**
+   - Install credentials the same way as in **zulip-kagi-bot**: either a JSON file mapping realm name to `{ "email", "api_key", "site" }`, or environment variables `ZULIP_REALM_<NAME>_EMAIL`, `ZULIP_REALM_<NAME>_API_KEY`, `ZULIP_REALM_<NAME>_SITE`.
+   - Point `[zulip] realms_config_file` at that JSON, or place `zulip_realms.json` in the working directory, or set `ZULIP_REALMS_CONFIG_FILE`.
+   - Per group, set `zulip_sources` to a list of tables: `realm`, `stream`, optional `topic`, `lookback_hours`, `max_messages`.
+   - If raw context exceeds `context_max_chars`, the tool calls Kagi’s **Universal Summarizer** with engine `muriel` (Research) once to compress it before scoring.
 
-LLM-RSS currently supports the following RSS providers:
+## Running
+
+Process every `*.toml` in `config.d/`:
+
+```bash
+python main.py
+```
+
+Single config file:
+
+```bash
+python main.py --config-path config.d/config.toml
+```
+
+Dry run (no XML written):
+
+```bash
+python main.py --dryrun
+```
+
+Cron example (daily at midnight):
+
+```bash
+0 0 * * * cd /path/to/llm-rss && /path/to/.venv/bin/python main.py
+```
+
+## Supported RSS providers
 
 - Nature
-- Arxiv
+- arXiv
 - APS (American Physical Society)
-- BioRxiv
+- bioRxiv
 - Cell
 - AIP (American Institute of Physics)
 - IOP (Institute of Physics)
 
-## Use with Cron
+## Hosting via nginx
 
-LLM-RSS is intended to be used along with a cron job to periodically update the filtered RSS feed. Here is an example of how to set up a cron job:
+`docker-compose.yaml` mounts `./data` at `/data/`. With the default nginx config, feeds are served under `/rss/` (for example `http://localhost:8080/rss/cm_physics.xml` if your group writes `data/cm_physics.xml`).
 
-1. **Open the crontab editor:**
-   ```bash
-   crontab -e
-   ```
+## Zotero
 
-2. **Add a new cron job:**
-   ```bash
-   0 0 * * * /usr/bin/python3 /path/to/llm-rss/main.py
-   ```
-   This cron job will run the script every day at 0:00.
+Add the hosted XML URL to Zotero as an RSS feed.
 
+## Contributing
 
-## Hosting via Nginx
-A `docker-compose.yaml` is provided to host the generated RSS feed via Nginx:
-```
-docker-compose up -d
-```
-The RSS feed will be available at http://localhost:8080/rss/rss.xml depending on your setup.
-
-## Feed to Zotero
-
-Add http://localhost:8080/rss/rss.xml to your Zotero RSS feed. Then you can read and access your papers in Zotero.
+For AI-assisted editing in Cursor, see [AGENTS.md](AGENTS.md) (includes a pointer to the Superpowers skill reference under [docs/superpowers-plugin.md](docs/superpowers-plugin.md)).

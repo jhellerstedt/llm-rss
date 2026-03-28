@@ -1,0 +1,60 @@
+# Kagi API: set api_key here or use environment variable KAGI_API_KEY
+[kagi]
+# api_key = "your-token"
+fastgpt_url = "https://kagi.com/api/v0/fastgpt"
+summarize_url = "https://kagi.com/api/v0/summarize"
+web_search = true
+summarize_engine = "muriel"
+fastgpt_timeout = 120
+summarize_timeout = 180
+use_cache = true
+
+# Zulip realms: JSON map realm_name -> { email, api_key, site }
+# Or set ZULIP_REALMS_CONFIG_FILE / ZULIP_REALM_<NAME>_EMAIL, etc. (see README)
+[zulip]
+# realms_config_file = "zulip_realms.json"
+context_max_chars = 12000
+
+# Topical group 1: condensed matter / general physics journals
+[[groups]]
+name = "cm_physics"
+urls = [
+    "https://www.nature.com/ncomms.rss",
+    "https://www.nature.com/nphys.rss",
+    "http://feeds.aps.org/rss/recent/prl.xml",
+]
+research_areas = [
+    "condensed matter physics, experimental methods",
+    "computational physics",
+]
+excluded_areas = [
+    "fusion plasma physics",
+]
+period = 24
+rss_path = "data/cm_physics.xml"
+relevance_threshold = 5
+impact_threshold = 3
+# concurrent_requests = 2
+# crawl_abstract = false
+
+# Optional: pull discussion context from Zulip (requires zulip_realms.json or env realms)
+# zulip_sources = [
+#   { realm = "myrealm", stream = "papers", lookback_hours = 168, max_messages = 400 },
+#   { realm = "myrealm", stream = "lab", topic = "reading", lookback_hours = 72, max_messages = 200 },
+# ]
+
+# Topical group 2: preprints example
+[[groups]]
+name = "plasma_preprints"
+urls = [
+    "http://rss.arxiv.org/rss/physics.plasm-ph",
+]
+research_areas = [
+    "laboratory plasma physics",
+    "diagnostics",
+]
+excluded_areas = []
+period = 24
+rss_path = "data/plasma_preprints.xml"
+relevance_threshold = 5
+impact_threshold = 3
