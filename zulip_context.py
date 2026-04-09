@@ -28,6 +28,8 @@ def strip_zulip_html(content: str) -> str:
 
 def load_zulip_realms(
     config_file: str | None = None,
+    *,
+    config_dir: Path | str | None = None,
 ) -> dict[str, dict[str, str]]:
     """Load realm credentials: name -> {email, api_key, site, bot_name?}."""
     path = config_file or os.environ.get("ZULIP_REALMS_CONFIG_FILE")
@@ -38,6 +40,16 @@ def load_zulip_realms(
             logger.info("Loaded %d Zulip realm(s) from %s", len(data), path)
             return data
         raise ValueError(f"Zulip realms file must be a JSON object: {path}")
+
+    if config_dir is not None:
+        sidecar = Path(config_dir) / "zulip_realms.json"
+        if sidecar.is_file():
+            with open(sidecar, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                logger.info("Loaded %d Zulip realm(s) from %s", len(data), sidecar)
+                return data
+            raise ValueError(f"Zulip realms file must be a JSON object: {sidecar}")
 
     default_json = Path("zulip_realms.json")
     if default_json.is_file():

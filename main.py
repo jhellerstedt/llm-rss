@@ -1,7 +1,5 @@
-import json
 import logging
 import os
-import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,10 +8,10 @@ import toml
 import typer
 from django.utils.feedgenerator import Rss201rev2Feed
 from dotenv import load_dotenv
-from pydantic import BaseModel
 from tqdm import tqdm
 
 from adapter import ArticleInfo, RSSAdapter
+from fastgpt_reply import Reply, parse_reply_from_fastgpt_output
 from kagi_client import KagiClient, DEFAULT_FASTGPT_URL, DEFAULT_SUMMARIZE_URL
 from zulip_context import build_zulip_context_block, load_zulip_realms
 
@@ -21,37 +19,8 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_FENCE = re.compile(r"^```(?:json)?\s*", re.IGNORECASE)
-
-
-class Reply(BaseModel):
-    relevance: int
-    impact: int
-    reason: str | None = None
-
-
 def to_bullets(text_list: list[str]) -> str:
     return "\n".join(f"- {item}" for item in text_list)
-
-
-def extract_json_object(text: str) -> str:
-    t = text.strip()
-    t = _FENCE.sub("", t)
-    t = re.sub(r"\s*```\s*$", "", t)
-    start, end = t.find("{"), t.rfind("}")
-    if start >= 0 and end > start:
-        return t[start : end + 1]
-    return t
-
-
-def parse_reply_from_fastgpt_output(text: str, article_title: str) -> Reply:
-    try:
-        raw = extract_json_object(text)
-        data = json.loads(raw)
-        return Reply.model_validate(data)
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning("JSON decode failed for %r: %s; snippet=%s", article_title, e, text[:400])
-        return Reply(relevance=0, impact=0, reason="decode error")
 
 
 def prepare_scoring_query(article: ArticleInfo, group: dict, zulip_block: str) -> str:
@@ -154,6 +123,8 @@ def make_kagi_client(kagi_table: dict) -> KagiClient:
         web_search=bool(kagi_table.get("web_search", True)),
         summarize_engine=str(kagi_table.get("summarize_engine", "muriel")),
         use_cache=bool(kagi_table.get("use_cache", True)),
+        max_concurrent_api_requests=int(kagi_table.get("max_concurrent_api_requests", 2)),
+        max_http_attempts=int(kagi_table.get("max_http_attempts", 12)),
     )
 
 
@@ -219,14 +190,24 @@ def process_group(
         crawler.result()
 
     if concurrent_requests is None:
-        concurrent_requests = max(1, len(recent_articles))
+        # Match Kagi throttling: extra threads would only block on the client semaphore.
+        concurrent_requests = min(
+            kagi.max_concurrent_api_requests,
+            max(1, len(recent_articles)),
+        )
 
     def worker(art: ArticleInfo) -> Reply:
         return get_kagi_reply(art, group, kagi, zulip_block)
 
     with ThreadPoolExecutor(max_workers=max(1, concurrent_requests)) as pool:
         futures = [pool.submit(worker, art) for art in recent_articles]
-        replies = [f.result() for f in tqdm(futures, desc=f"Kagi FastGPT ({group_name})")]
+        replies: list[Reply] = []
+        for f in tqdm(futures, desc=f"Kagi FastGPT ({group_name})"):
+            try:
+                replies.append(f.result())
+            except Exception as e:
+                logger.warning("FastGPT worker failed: %s", e)
+                replies.append(Reply(relevance=0, impact=0, reason="worker error"))
 
     for article, reply in zip(recent_articles, replies):
         if reply.relevance > relevance_threshold and reply.impact > impact_threshold:
@@ -237,13 +218,26 @@ def process_group(
                 pubdate=now,
             )
 
-    if new_feed.num_items() > 0 and not dryrun:
+    n_scored = len(recent_articles)
+    n_kept = new_feed.num_items()
+
+    if n_kept > 0 and not dryrun:
         Path(rss_path).parent.mkdir(parents=True, exist_ok=True)
         with open(rss_path, "w", encoding="utf-8") as f:
             new_feed.write(f, "utf-8")
-        print(f"Wrote {new_feed.num_items()} items to {rss_path}")
+        print(f"Wrote {n_kept} items to {rss_path}")
+    elif dryrun:
+        print(
+            f"[{group_name}] dry run — would write {n_kept} item(s) to {rss_path} "
+            f"(scored {n_scored} article(s) in period)"
+        )
+    elif n_scored == 0:
+        print(f"[{group_name}] no XML written — no articles in the time window ({rss_path} unchanged)")
     else:
-        print(f"[{group_name}] not updated (no items or dryrun)")
+        print(
+            f"[{group_name}] no XML written — {n_scored} article(s) scored, none above "
+            f"relevance>{relevance_threshold} and impact>{impact_threshold} ({rss_path} unchanged)"
+        )
 
 
 def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
@@ -254,10 +248,15 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         raise ValueError("Kagi API key missing: set [kagi] api_key or environment variable KAGI_API_KEY")
 
     zulip_cfg = cfg.get("zulip") or {}
-    realms_path = zulip_cfg.get("realms_config_file")
-    if realms_path is None:
+    realms_path_cfg = zulip_cfg.get("realms_config_file")
+    if realms_path_cfg:
+        rp = Path(realms_path_cfg)
+        if not rp.is_absolute():
+            rp = (config_path.parent / rp).resolve()
+        realms_path = str(rp)
+    else:
         realms_path = os.environ.get("ZULIP_REALMS_CONFIG_FILE")
-    zulip_realms = load_zulip_realms(config_file=realms_path)
+    zulip_realms = load_zulip_realms(config_file=realms_path, config_dir=config_path.parent)
 
     groups = expand_groups(cfg)
     for group in groups:
