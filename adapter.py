@@ -67,12 +67,25 @@ class BaseRSSAdapter:
         return entry['updated']
 
     def _get_entry_authors(self, entry) -> str:
-        if 'authors' in entry and entry['authors']: 
-            return ', '.join([author['name'] for author in entry['authors']])
-        return ''
+        raw = entry.get("authors")
+        if not raw:
+            return ""
+        names: list[str] = []
+        for author in raw:
+            if not isinstance(author, dict):
+                continue
+            label = author.get("name") or author.get("email") or author.get("href")
+            if label:
+                names.append(str(label).strip())
+        return ", ".join(names)
     
     def crawl_abstract(self, article: ArticleInfo):
         pass
+
+
+class GenericRSSAdapter(BaseRSSAdapter):
+    """Standard feedparser behavior for RSS/Atom feeds without site-specific parsing."""
+
 
 class RSSAdapter(BaseRSSAdapter):
     def __new__(cls, rss_url):
@@ -91,7 +104,7 @@ class RSSAdapter(BaseRSSAdapter):
         elif 'cell.com' in rss_url:
             return CellAdapter(rss_url)
         else:
-            raise ValueError("Unsupported RSS feed URL")
+            return GenericRSSAdapter(rss_url)
 
 class NatureAdapter(BaseRSSAdapter):
     def _get_entry_abstract(self, entry):

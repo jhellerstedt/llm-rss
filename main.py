@@ -1,57 +1,26 @@
-import json
 import logging
 import os
-import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 from pathlib import Path
 
 import toml
 import typer
 from django.utils.feedgenerator import Rss201rev2Feed
 from dotenv import load_dotenv
-from pydantic import BaseModel
 from tqdm import tqdm
 
 from adapter import ArticleInfo, RSSAdapter
+from fastgpt_reply import Reply, parse_reply_from_fastgpt_output
 from kagi_client import KagiClient, DEFAULT_FASTGPT_URL, DEFAULT_SUMMARIZE_URL
+from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history
 from zulip_context import build_zulip_context_block, load_zulip_realms
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_FENCE = re.compile(r"^```(?:json)?\s*", re.IGNORECASE)
-
-
-class Reply(BaseModel):
-    relevance: int
-    impact: int
-    reason: str | None = None
-
-
 def to_bullets(text_list: list[str]) -> str:
     return "\n".join(f"- {item}" for item in text_list)
-
-
-def extract_json_object(text: str) -> str:
-    t = text.strip()
-    t = _FENCE.sub("", t)
-    t = re.sub(r"\s*```\s*$", "", t)
-    start, end = t.find("{"), t.rfind("}")
-    if start >= 0 and end > start:
-        return t[start : end + 1]
-    return t
-
-
-def parse_reply_from_fastgpt_output(text: str, article_title: str) -> Reply:
-    try:
-        raw = extract_json_object(text)
-        data = json.loads(raw)
-        return Reply.model_validate(data)
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning("JSON decode failed for %r: %s; snippet=%s", article_title, e, text[:400])
-        return Reply(relevance=0, impact=0, reason="decode error")
 
 
 def prepare_scoring_query(article: ArticleInfo, group: dict, zulip_block: str) -> str:
@@ -109,6 +78,7 @@ def _legacy_group(cfg: dict) -> dict:
         "research_areas": cfg["research_areas"],
         "excluded_areas": cfg["excluded_areas"],
         "rss_path": cfg.get("rss_path", "data/rss.xml"),
+        "rss_max_items": int(cfg.get("rss_max_items", 25)),
         "period": cfg.get("period", 24),
         "relevance_threshold": cfg.get("relevance_threshold", 5),
         "impact_threshold": cfg.get("impact_threshold", 3),
@@ -128,6 +98,9 @@ def expand_groups(cfg: dict) -> list[dict]:
                 "research_areas": g["research_areas"],
                 "excluded_areas": g["excluded_areas"],
                 "rss_path": g.get("rss_path", cfg.get("rss_path", "data/rss.xml")),
+                "rss_max_items": int(
+                    g.get("rss_max_items", cfg.get("rss_max_items", 25))
+                ),
                 "period": g.get("period", cfg.get("period", 24)),
                 "relevance_threshold": g.get(
                     "relevance_threshold", cfg.get("relevance_threshold", 5)
@@ -154,6 +127,8 @@ def make_kagi_client(kagi_table: dict) -> KagiClient:
         web_search=bool(kagi_table.get("web_search", True)),
         summarize_engine=str(kagi_table.get("summarize_engine", "muriel")),
         use_cache=bool(kagi_table.get("use_cache", True)),
+        max_concurrent_api_requests=int(kagi_table.get("max_concurrent_api_requests", 2)),
+        max_http_attempts=int(kagi_table.get("max_http_attempts", 12)),
     )
 
 
@@ -190,15 +165,8 @@ def process_group(
                 kagi_summarize=kagi,
             )
 
-    new_feed = Rss201rev2Feed(
-        title=f"Filtered RSS — {group_name}",
-        link="myserver",
-        description=f"LLM-filtered feed ({group_name})",
-        language="en",
-    )
-
-    now = datetime.now(tz=timezone.utc)
     rss_urls = group["urls"]
+    rss_max_items = group["rss_max_items"]
     recent_articles: list[ArticleInfo] = []
     article_titles: list[str] = []
     crawlers = []
@@ -219,31 +187,80 @@ def process_group(
         crawler.result()
 
     if concurrent_requests is None:
-        concurrent_requests = max(1, len(recent_articles))
+        # Match Kagi throttling: extra threads would only block on the client semaphore.
+        concurrent_requests = min(
+            kagi.max_concurrent_api_requests,
+            max(1, len(recent_articles)),
+        )
 
     def worker(art: ArticleInfo) -> Reply:
         return get_kagi_reply(art, group, kagi, zulip_block)
 
     with ThreadPoolExecutor(max_workers=max(1, concurrent_requests)) as pool:
         futures = [pool.submit(worker, art) for art in recent_articles]
-        replies = [f.result() for f in tqdm(futures, desc=f"Kagi FastGPT ({group_name})")]
+        replies: list[Reply] = []
+        for f in tqdm(futures, desc=f"Kagi FastGPT ({group_name})"):
+            try:
+                replies.append(f.result())
+            except Exception as e:
+                logger.warning("FastGPT worker failed: %s", e)
+                replies.append(Reply(relevance=0, impact=0, reason="worker error"))
 
+    new_items: list[FeedItem] = []
     for article, reply in zip(recent_articles, replies):
         if reply.relevance > relevance_threshold and reply.impact > impact_threshold:
-            new_feed.add_item(
-                title=article.title,
-                link=str(article.link),
-                description=f"{reply.relevance=}\n {reply.impact=}\n " + article.abstract,
-                pubdate=now,
+            new_items.append(
+                FeedItem(
+                    title=article.title,
+                    link=str(article.link),
+                    description=(
+                        f"{reply.relevance=}\n {reply.impact=}\n " + article.abstract
+                    ),
+                    pubdate=article.updated,
+                    unique_id=str(article.link),
+                )
             )
 
-    if new_feed.num_items() > 0 and not dryrun:
+    n_scored = len(recent_articles)
+    n_new_this_run = len(new_items)
+    persisted = load_persisted_feed_items(Path(rss_path))
+    merged = merge_feed_history(persisted, new_items, rss_max_items)
+    n_kept = len(merged)
+
+    new_feed = Rss201rev2Feed(
+        title=f"Filtered RSS — {group_name}",
+        link="myserver",
+        description=f"LLM-filtered feed ({group_name})",
+        language="en",
+    )
+    for item in merged:
+        new_feed.add_item(
+            title=item.title,
+            link=item.link,
+            description=item.description,
+            pubdate=item.pubdate,
+            unique_id=item.unique_id,
+        )
+
+    if n_kept > 0 and not dryrun:
         Path(rss_path).parent.mkdir(parents=True, exist_ok=True)
         with open(rss_path, "w", encoding="utf-8") as f:
             new_feed.write(f, "utf-8")
-        print(f"Wrote {new_feed.num_items()} items to {rss_path}")
-    else:
-        print(f"[{group_name}] not updated (no items or dryrun)")
+        print(
+            f"Wrote {n_kept} item(s) to {rss_path} "
+            f"({n_new_this_run} passed threshold this run, cap={rss_max_items})"
+        )
+    elif dryrun:
+        print(
+            f"[{group_name}] dry run — would write {n_kept} item(s) to {rss_path} "
+            f"({n_new_this_run} passed threshold this run, scored {n_scored} in period, "
+            f"cap={rss_max_items})"
+        )
+    elif n_kept == 0:
+        print(
+            f"[{group_name}] no XML written — no persisted items and nothing passed "
+            f"threshold this run ({rss_path} unchanged)"
+        )
 
 
 def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
@@ -254,10 +271,15 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         raise ValueError("Kagi API key missing: set [kagi] api_key or environment variable KAGI_API_KEY")
 
     zulip_cfg = cfg.get("zulip") or {}
-    realms_path = zulip_cfg.get("realms_config_file")
-    if realms_path is None:
+    realms_path_cfg = zulip_cfg.get("realms_config_file")
+    if realms_path_cfg:
+        rp = Path(realms_path_cfg)
+        if not rp.is_absolute():
+            rp = (config_path.parent / rp).resolve()
+        realms_path = str(rp)
+    else:
         realms_path = os.environ.get("ZULIP_REALMS_CONFIG_FILE")
-    zulip_realms = load_zulip_realms(config_file=realms_path)
+    zulip_realms = load_zulip_realms(config_file=realms_path, config_dir=config_path.parent)
 
     groups = expand_groups(cfg)
     for group in groups:

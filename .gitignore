@@ -3,3 +3,7 @@
 
 .venv/
 *.pyc
+
+# Secrets in local config (tracked templates: *.example.* or README in config.d/)
+config.d/**/*.toml
+config.d/**/*.json
