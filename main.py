@@ -1,7 +1,6 @@
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 from pathlib import Path
 
 import toml
@@ -13,6 +12,7 @@ from tqdm import tqdm
 from adapter import ArticleInfo, RSSAdapter
 from fastgpt_reply import Reply, parse_reply_from_fastgpt_output
 from kagi_client import KagiClient, DEFAULT_FASTGPT_URL, DEFAULT_SUMMARIZE_URL
+from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history
 from zulip_context import build_zulip_context_block, load_zulip_realms
 
 load_dotenv()
@@ -78,6 +78,7 @@ def _legacy_group(cfg: dict) -> dict:
         "research_areas": cfg["research_areas"],
         "excluded_areas": cfg["excluded_areas"],
         "rss_path": cfg.get("rss_path", "data/rss.xml"),
+        "rss_max_items": int(cfg.get("rss_max_items", 25)),
         "period": cfg.get("period", 24),
         "relevance_threshold": cfg.get("relevance_threshold", 5),
         "impact_threshold": cfg.get("impact_threshold", 3),
@@ -97,6 +98,9 @@ def expand_groups(cfg: dict) -> list[dict]:
                 "research_areas": g["research_areas"],
                 "excluded_areas": g["excluded_areas"],
                 "rss_path": g.get("rss_path", cfg.get("rss_path", "data/rss.xml")),
+                "rss_max_items": int(
+                    g.get("rss_max_items", cfg.get("rss_max_items", 25))
+                ),
                 "period": g.get("period", cfg.get("period", 24)),
                 "relevance_threshold": g.get(
                     "relevance_threshold", cfg.get("relevance_threshold", 5)
@@ -161,15 +165,8 @@ def process_group(
                 kagi_summarize=kagi,
             )
 
-    new_feed = Rss201rev2Feed(
-        title=f"Filtered RSS — {group_name}",
-        link="myserver",
-        description=f"LLM-filtered feed ({group_name})",
-        language="en",
-    )
-
-    now = datetime.now(tz=timezone.utc)
     rss_urls = group["urls"]
+    rss_max_items = group["rss_max_items"]
     recent_articles: list[ArticleInfo] = []
     article_titles: list[str] = []
     crawlers = []
@@ -209,34 +206,60 @@ def process_group(
                 logger.warning("FastGPT worker failed: %s", e)
                 replies.append(Reply(relevance=0, impact=0, reason="worker error"))
 
+    new_items: list[FeedItem] = []
     for article, reply in zip(recent_articles, replies):
         if reply.relevance > relevance_threshold and reply.impact > impact_threshold:
-            new_feed.add_item(
-                title=article.title,
-                link=str(article.link),
-                description=f"{reply.relevance=}\n {reply.impact=}\n " + article.abstract,
-                pubdate=now,
+            new_items.append(
+                FeedItem(
+                    title=article.title,
+                    link=str(article.link),
+                    description=(
+                        f"{reply.relevance=}\n {reply.impact=}\n " + article.abstract
+                    ),
+                    pubdate=article.updated,
+                    unique_id=str(article.link),
+                )
             )
 
     n_scored = len(recent_articles)
-    n_kept = new_feed.num_items()
+    n_new_this_run = len(new_items)
+    persisted = load_persisted_feed_items(Path(rss_path))
+    merged = merge_feed_history(persisted, new_items, rss_max_items)
+    n_kept = len(merged)
+
+    new_feed = Rss201rev2Feed(
+        title=f"Filtered RSS — {group_name}",
+        link="myserver",
+        description=f"LLM-filtered feed ({group_name})",
+        language="en",
+    )
+    for item in merged:
+        new_feed.add_item(
+            title=item.title,
+            link=item.link,
+            description=item.description,
+            pubdate=item.pubdate,
+            unique_id=item.unique_id,
+        )
 
     if n_kept > 0 and not dryrun:
         Path(rss_path).parent.mkdir(parents=True, exist_ok=True)
         with open(rss_path, "w", encoding="utf-8") as f:
             new_feed.write(f, "utf-8")
-        print(f"Wrote {n_kept} items to {rss_path}")
+        print(
+            f"Wrote {n_kept} item(s) to {rss_path} "
+            f"({n_new_this_run} passed threshold this run, cap={rss_max_items})"
+        )
     elif dryrun:
         print(
             f"[{group_name}] dry run — would write {n_kept} item(s) to {rss_path} "
-            f"(scored {n_scored} article(s) in period)"
+            f"({n_new_this_run} passed threshold this run, scored {n_scored} in period, "
+            f"cap={rss_max_items})"
         )
-    elif n_scored == 0:
-        print(f"[{group_name}] no XML written — no articles in the time window ({rss_path} unchanged)")
-    else:
+    elif n_kept == 0:
         print(
-            f"[{group_name}] no XML written — {n_scored} article(s) scored, none above "
-            f"relevance>{relevance_threshold} and impact>{impact_threshold} ({rss_path} unchanged)"
+            f"[{group_name}] no XML written — no persisted items and nothing passed "
+            f"threshold this run ({rss_path} unchanged)"
         )
 
 

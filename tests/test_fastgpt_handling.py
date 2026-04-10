@@ -18,6 +18,36 @@ class TestFastGPTHandling(unittest.TestCase):
         self.assertEqual(reply.impact, 7)
         self.assertIn("infty", reply.reason or "")
 
+    def test_parse_reply_allows_backslash_apostrophe_renyi(self) -> None:
+        # Models often emit TeX-style \' inside JSON strings; JSON does not allow \'.
+        from fastgpt_reply import parse_reply_from_fastgpt_output
+
+        invalid_json = (
+            '{"relevance": 2, "impact": 6, "reason": "R'
+            + "\\'enyi"
+            + ' entropy and key rates"}'
+        )
+        text = f"```json\n{invalid_json}\n```"
+        reply = parse_reply_from_fastgpt_output(text, article_title="t")
+        self.assertEqual(reply.relevance, 2)
+        self.assertEqual(reply.impact, 6)
+        self.assertIsNotNone(reply.reason)
+        self.assertIn("enyi", reply.reason or "")
+
+    def test_parse_reply_allows_caret_infty_in_reason(self) -> None:
+        from fastgpt_reply import parse_reply_from_fastgpt_output
+
+        invalid_json = (
+            '{"relevance": 8, "impact": 7, "reason": "Coherent feedback $H^'
+            + "\\infty"
+            + '$ control"}'
+        )
+        text = f"```json\n{invalid_json}\n```"
+        reply = parse_reply_from_fastgpt_output(text, article_title="t")
+        self.assertEqual(reply.relevance, 8)
+        self.assertEqual(reply.impact, 7)
+        self.assertIn("infty", reply.reason or "")
+
     def test_fastgpt_retries_on_429_with_retry_after(self) -> None:
         from kagi_client import KagiClient
 
