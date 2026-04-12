@@ -17,6 +17,8 @@ max_http_attempts = 12
 # Set mailto so OpenAlex can contact you if needed (also configurable via OPENALEX_MAILTO).
 [openalex]
 enabled = true
+# When OpenAlex leaves name/affiliations as Unknown, ask Kagi FastGPT (extra API calls).
+kagi_fallback = true
 # mailto = "you@example.com"
 
 # Zulip realms: JSON map realm_name -> { email, api_key, site }

@@ -12,7 +12,12 @@ from tqdm import tqdm
 from adapter import ArticleInfo, RSSAdapter
 from fastgpt_reply import Reply, parse_reply_from_fastgpt_output
 from kagi_client import KagiClient, DEFAULT_FASTGPT_URL, DEFAULT_SUMMARIZE_URL
-from openalex_enrich import batch_enrich_articles
+from openalex_enrich import (
+    PaperEnrichment,
+    apply_kagi_metadata_backfill,
+    batch_enrich_articles,
+    format_enrichment_for_feed,
+)
 from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history
 from zulip_context import build_zulip_context_block, load_zulip_realms
 
@@ -149,6 +154,7 @@ def process_group(
     crawl_abstract = group["crawl_abstract"]
     group_name = group["name"]
     openalex_enabled = bool(openalex_cfg.get("enabled", True))
+    openalex_kagi_fallback = bool(openalex_cfg.get("kagi_fallback", True))
     openalex_mailto = str(
         openalex_cfg.get("mailto") or os.environ.get("OPENALEX_MAILTO", "")
     )
@@ -218,16 +224,28 @@ def process_group(
         if reply.relevance > relevance_threshold and reply.impact > impact_threshold
     ]
 
-    openalex_blocks: dict[str, str] = {}
-    if openalex_enabled and passing:
-        openalex_blocks = batch_enrich_articles(
-            [a for a, _ in passing],
-            mailto=openalex_mailto,
-        )
+    enrichment_by_link: dict[str, PaperEnrichment | None] = {}
+    if passing:
+        if openalex_enabled:
+            enrichment_by_link = batch_enrich_articles(
+                [a for a, _ in passing],
+                mailto=openalex_mailto,
+            )
+        else:
+            enrichment_by_link = {str(a.link): None for a, _ in passing}
+
+        if openalex_kagi_fallback:
+            apply_kagi_metadata_backfill(
+                enrichment_by_link,
+                [a for a, _ in passing],
+                kagi,
+            )
 
     new_items: list[FeedItem] = []
     for article, reply in passing:
-        meta = (openalex_blocks.get(str(article.link)) or "").strip()
+        meta = format_enrichment_for_feed(
+            enrichment_by_link.get(str(article.link))
+        ).strip()
         desc_parts = [
             f"{reply.relevance=}\n{reply.impact=}",
         ]

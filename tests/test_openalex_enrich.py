@@ -7,10 +7,14 @@ from datetime import datetime, timezone
 from openalex_enrich import (
     AuthorMetric,
     PaperEnrichment,
+    apply_kagi_metadata_backfill,
     batch_enrich_articles,
     build_enrichment_for_work,
     extract_arxiv_id,
     extract_doi_from_link,
+    format_enrichment_for_feed,
+    merge_paper_enrichment,
+    paper_enrichment_incomplete,
 )
 
 
@@ -110,9 +114,51 @@ class TestBatchEnrichMocked(unittest.TestCase):
             authors="",
         )
         out = batch_enrich_articles([art], mailto="t@example.com")
-        block = out[str(art.link)]
+        block = format_enrichment_for_feed(out[str(art.link)])
         self.assertIn("h-index 7", block)
         self.assertIn("Solo", block)
+
+
+class TestMergeAndFallback(unittest.TestCase):
+    def test_merge_prefers_openalex_when_known(self) -> None:
+        oa = PaperEnrichment("Alice", 5, "MIT", "Unknown")
+        kg = PaperEnrichment("Bob", 99, "Oxford", "Stanford")
+        m = merge_paper_enrichment(oa, kg)
+        assert m is not None
+        self.assertEqual(m.top_author_name, "Alice")
+        self.assertEqual(m.top_h_index, 5)
+        self.assertEqual(m.first_affiliation, "MIT")
+        self.assertEqual(m.last_affiliation, "Stanford")
+
+    def test_incomplete_when_aff_unknown(self) -> None:
+        en = PaperEnrichment("A", 1, "MIT", "Unknown")
+        self.assertTrue(paper_enrichment_incomplete(en))
+
+    def test_format_skips_all_unknown(self) -> None:
+        z = PaperEnrichment("Unknown", 0, "Unknown", "Unknown")
+        self.assertEqual(format_enrichment_for_feed(z), "")
+
+    def test_apply_kagi_backfill_merges(self) -> None:
+        art = ArticleInfo(
+            title="T",
+            link="https://example.com/p",
+            abstract="abs",
+            updated=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            authors="",
+        )
+        by_link: dict[str, PaperEnrichment | None] = {str(art.link): None}
+
+        class FakeKagi:
+            def fastgpt_query(self, query: str) -> str:
+                return (
+                    '{"top_author_name": "Zed", "top_author_h_index": 3, '
+                    '"first_author_institution": "U1", "last_author_institution": "U2"}'
+                )
+
+        apply_kagi_metadata_backfill(by_link, [art], FakeKagi())  # type: ignore[arg-type]
+        block = format_enrichment_for_feed(by_link[str(art.link)])
+        self.assertIn("Zed", block)
+        self.assertIn("U1", block)
 
 
 if __name__ == "__main__":
