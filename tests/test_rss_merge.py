@@ -17,7 +17,9 @@ class TestRssMerge(unittest.TestCase):
         b = normalize_link("https://example.com/foo")
         self.assertEqual(a, b)
 
-    def test_merge_keeps_old_entry_when_link_reappears(self) -> None:
+    def test_merge_refreshes_description_keeps_pubdate_when_link_reappears(
+        self,
+    ) -> None:
         old_pub = datetime(2024, 1, 1, tzinfo=timezone.utc)
         new_pub = datetime(2025, 6, 1, tzinfo=timezone.utc)
         persisted = [
@@ -33,7 +35,7 @@ class TestRssMerge(unittest.TestCase):
             FeedItem(
                 title="New title",
                 link="https://example.com/paper",
-                description="new desc",
+                description="new desc with metadata",
                 pubdate=new_pub,
                 unique_id="https://example.com/paper",
             )
@@ -41,7 +43,9 @@ class TestRssMerge(unittest.TestCase):
         merged = merge_feed_history(persisted, new_items, max_items=25)
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0].pubdate, old_pub)
-        self.assertEqual(merged[0].description, "old desc")
+        self.assertEqual(merged[0].unique_id, "https://example.com/paper")
+        self.assertEqual(merged[0].title, "New title")
+        self.assertEqual(merged[0].description, "new desc with metadata")
 
     def test_merge_adds_new_links_and_caps(self) -> None:
         persisted = [
