@@ -2,6 +2,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import toml
 import typer
@@ -20,6 +21,11 @@ from openalex_enrich import (
 )
 from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history
 from zulip_context import build_zulip_context_block, load_zulip_realms
+from zulip_feedback import (
+    format_feedback_prompt_snippet,
+    load_feedback_state_for_group,
+    post_feedback_ranking_for_new_items,
+)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +35,12 @@ def to_bullets(text_list: list[str]) -> str:
     return "\n".join(f"- {item}" for item in text_list)
 
 
-def prepare_scoring_query(article: ArticleInfo, group: dict, zulip_block: str) -> str:
+def prepare_scoring_query(
+    article: ArticleInfo,
+    group: dict,
+    zulip_block: str,
+    feedback_snippet: str = "",
+) -> str:
     research_areas = to_bullets(group["research_areas"])
     excluded_areas = to_bullets(group["excluded_areas"])
     zulip_section = ""
@@ -38,6 +49,7 @@ def prepare_scoring_query(article: ArticleInfo, group: dict, zulip_block: str) -
             "\n### Context from Zulip (team discussion; may be summarized)\n"
             f"{zulip_block.strip()}\n"
         )
+    fb = feedback_snippet.strip()
 
     return f"""You are an academic paper evaluator curating an RSS feed.
 Based on the title, abstract, the user's research areas, and any Zulip team context below, evaluate the paper.
@@ -49,7 +61,7 @@ User research areas:
 
 Excluded areas (generally lower relevance if the work is primarily in these):
 {excluded_areas}
-{zulip_section}
+{zulip_section}{fb}
 ### Article
 title: {article.title}
 abstract: {article.abstract}
@@ -65,8 +77,9 @@ def get_kagi_reply(
     group: dict,
     kagi: KagiClient,
     zulip_block: str,
+    feedback_snippet: str = "",
 ) -> Reply:
-    query = prepare_scoring_query(article, group, zulip_block)
+    query = prepare_scoring_query(article, group, zulip_block, feedback_snippet)
     output = kagi.fastgpt_query(query)
     return parse_reply_from_fastgpt_output(output, article.title)
 
@@ -177,6 +190,13 @@ def process_group(
                 kagi_summarize=kagi,
             )
 
+    feedback_signals: dict[str, tuple[int, int]] = {}
+    feedback_msgs_by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    if zulip_sources and zulip_realms:
+        feedback_signals, feedback_msgs_by_pair = load_feedback_state_for_group(
+            zulip_sources, zulip_realms
+        )
+
     rss_urls = group["urls"]
     rss_max_items = group["rss_max_items"]
     recent_articles: list[ArticleInfo] = []
@@ -206,7 +226,8 @@ def process_group(
         )
 
     def worker(art: ArticleInfo) -> Reply:
-        return get_kagi_reply(art, group, kagi, zulip_block)
+        fb = format_feedback_prompt_snippet(str(art.link), feedback_signals)
+        return get_kagi_reply(art, group, kagi, zulip_block, feedback_snippet=fb)
 
     with ThreadPoolExecutor(max_workers=max(1, concurrent_requests)) as pool:
         futures = [pool.submit(worker, art) for art in recent_articles]
@@ -261,6 +282,15 @@ def process_group(
                 pubdate=article.updated,
                 unique_id=str(article.link),
             )
+        )
+
+    if zulip_sources and zulip_realms and new_items:
+        post_feedback_ranking_for_new_items(
+            zulip_sources,
+            zulip_realms,
+            messages_by_pair=feedback_msgs_by_pair,
+            titles_and_links=[(it.title, it.link) for it in new_items],
+            dryrun=dryrun,
         )
 
     n_scored = len(recent_articles)

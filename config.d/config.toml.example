@@ -49,7 +49,11 @@ impact_threshold = 3
 # concurrent_requests = 2
 # crawl_abstract = false
 
-# Optional: pull discussion context from Zulip (requires zulip_realms.json or env realms)
+# Optional: pull discussion context from Zulip (requires zulip_realms.json or env realms).
+# Each row's optional "topic" / lookback only affect discussion context, not feedback.
+# When zulip_sources is set, the bot also posts each newly recommended article (one message
+# per paper) to the same realm+stream under the topic "feedback ranking", and reads
+# :thumbs_up: / :thumbs_down: reactions there to inform later scoring runs.
 # zulip_sources = [
 #   { realm = "myrealm", stream = "papers", lookback_hours = 168, max_messages = 400 },
 #   { realm = "myrealm", stream = "lab", topic = "reading", lookback_hours = 72, max_messages = 200 },
