@@ -13,6 +13,14 @@ max_concurrent_api_requests = 2
 # Retries per request (429 / transient 5xx)
 max_http_attempts = 12
 
+# OpenAlex metadata for feed items (h-index, first/last author affiliations).
+# Set mailto so OpenAlex can contact you if needed (also configurable via OPENALEX_MAILTO).
+[openalex]
+enabled = true
+# When OpenAlex leaves name/affiliations as Unknown, ask Kagi FastGPT (extra API calls).
+kagi_fallback = true
+# mailto = "you@example.com"
+
 # Zulip realms: JSON map realm_name -> { email, api_key, site }
 # Or set ZULIP_REALMS_CONFIG_FILE / ZULIP_REALM_<NAME>_EMAIL, etc. (see README)
 [zulip]

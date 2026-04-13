@@ -12,6 +12,12 @@ from tqdm import tqdm
 from adapter import ArticleInfo, RSSAdapter
 from fastgpt_reply import Reply, parse_reply_from_fastgpt_output
 from kagi_client import KagiClient, DEFAULT_FASTGPT_URL, DEFAULT_SUMMARIZE_URL
+from openalex_enrich import (
+    PaperEnrichment,
+    apply_kagi_metadata_backfill,
+    batch_enrich_articles,
+    format_enrichment_for_feed,
+)
 from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history
 from zulip_context import build_zulip_context_block, load_zulip_realms
 
@@ -137,6 +143,7 @@ def process_group(
     kagi: KagiClient,
     zulip_realms: dict,
     zulip_cfg: dict,
+    openalex_cfg: dict,
     dryrun: bool,
 ) -> None:
     rss_path = group["rss_path"]
@@ -146,6 +153,11 @@ def process_group(
     concurrent_requests = group["concurrent_requests"]
     crawl_abstract = group["crawl_abstract"]
     group_name = group["name"]
+    openalex_enabled = bool(openalex_cfg.get("enabled", True))
+    openalex_kagi_fallback = bool(openalex_cfg.get("kagi_fallback", True))
+    openalex_mailto = str(
+        openalex_cfg.get("mailto") or os.environ.get("OPENALEX_MAILTO", "")
+    )
 
     context_max_chars = int(zulip_cfg.get("context_max_chars", 12_000))
     zulip_sources = group.get("zulip_sources") or []
@@ -206,20 +218,50 @@ def process_group(
                 logger.warning("FastGPT worker failed: %s", e)
                 replies.append(Reply(relevance=0, impact=0, reason="worker error"))
 
-    new_items: list[FeedItem] = []
-    for article, reply in zip(recent_articles, replies):
-        if reply.relevance > relevance_threshold and reply.impact > impact_threshold:
-            new_items.append(
-                FeedItem(
-                    title=article.title,
-                    link=str(article.link),
-                    description=(
-                        f"{reply.relevance=}\n {reply.impact=}\n " + article.abstract
-                    ),
-                    pubdate=article.updated,
-                    unique_id=str(article.link),
-                )
+    passing: list[tuple[ArticleInfo, Reply]] = [
+        (article, reply)
+        for article, reply in zip(recent_articles, replies)
+        if reply.relevance > relevance_threshold and reply.impact > impact_threshold
+    ]
+
+    enrichment_by_link: dict[str, PaperEnrichment | None] = {}
+    if passing:
+        if openalex_enabled:
+            enrichment_by_link = batch_enrich_articles(
+                [a for a, _ in passing],
+                mailto=openalex_mailto,
             )
+        else:
+            enrichment_by_link = {str(a.link): None for a, _ in passing}
+
+        if openalex_kagi_fallback:
+            apply_kagi_metadata_backfill(
+                enrichment_by_link,
+                [a for a, _ in passing],
+                kagi,
+            )
+
+    new_items: list[FeedItem] = []
+    for article, reply in passing:
+        meta = format_enrichment_for_feed(
+            enrichment_by_link.get(str(article.link))
+        ).strip()
+        desc_parts = [
+            f"{reply.relevance=}\n{reply.impact=}",
+        ]
+        if meta:
+            desc_parts.append(meta)
+        desc_parts.append(article.abstract)
+        description = "\n\n".join(desc_parts)
+        new_items.append(
+            FeedItem(
+                title=article.title,
+                link=str(article.link),
+                description=description,
+                pubdate=article.updated,
+                unique_id=str(article.link),
+            )
+        )
 
     n_scored = len(recent_articles)
     n_new_this_run = len(new_items)
@@ -265,6 +307,7 @@ def process_group(
 
 def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
     cfg = toml.load(config_path)
+    openalex_cfg = dict(cfg.get("openalex") or {})
     kagi_table = cfg.get("kagi") or {}
     kagi = make_kagi_client(kagi_table)
     if not kagi.api_key:
@@ -284,7 +327,7 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
     groups = expand_groups(cfg)
     for group in groups:
         print(f"--- Group: {group['name']} ---")
-        process_group(group, kagi, zulip_realms, zulip_cfg, dryrun)
+        process_group(group, kagi, zulip_realms, zulip_cfg, openalex_cfg, dryrun)
 
 
 def _main(

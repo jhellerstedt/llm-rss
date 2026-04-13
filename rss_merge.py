@@ -74,14 +74,30 @@ def merge_feed_history(
     new_items: list[FeedItem],
     max_items: int,
 ) -> list[FeedItem]:
-    """Keep persisted entries; add only new links. Sort newest first, cap at max_items."""
+    """Merge persisted history with items from this run.
+
+    New links are added. If a link already exists, the entry from ``new_items``
+    replaces title/description/link for that key so re-passing papers pick up
+    updated scores and metadata (e.g. OpenAlex h-index), while ``pubdate``
+    and ``unique_id`` stay the same as the first persisted copy for stable
+    ordering and feed reader identity.
+    """
     by_key: dict[str, FeedItem] = {}
     for item in persisted:
         by_key.setdefault(normalize_link(item.link), item)
     for item in new_items:
         key = normalize_link(item.link)
-        if key not in by_key:
+        existing = by_key.get(key)
+        if existing is None:
             by_key[key] = item
+        else:
+            by_key[key] = FeedItem(
+                title=item.title,
+                link=item.link,
+                description=item.description,
+                pubdate=existing.pubdate,
+                unique_id=existing.unique_id,
+            )
     merged = sorted(
         by_key.values(),
         key=lambda i: i.pubdate,

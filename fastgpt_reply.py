@@ -38,6 +38,20 @@ def _sanitize_invalid_json_escapes(raw_json: str) -> str:
     return out
 
 
+def try_load_json_object_from_llm(text: str) -> dict | None:
+    """Parse a single JSON object from model output (handles fences and bad escapes)."""
+    raw = extract_json_object(text)
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        try:
+            data = json.loads(_sanitize_invalid_json_escapes(raw))
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+
 def parse_reply_from_fastgpt_output(text: str, article_title: str) -> Reply:
     raw = extract_json_object(text)
     try:
