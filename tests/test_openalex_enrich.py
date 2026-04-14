@@ -15,6 +15,7 @@ from openalex_enrich import (
     format_enrichment_for_feed,
     merge_paper_enrichment,
     paper_enrichment_incomplete,
+    direct_openalex_work_urls,
 )
 
 
@@ -28,6 +29,23 @@ class TestOpenAlexHelpers(unittest.TestCase):
             extract_arxiv_id("http://arxiv.org/pdf/2312.00001"),
             "2312.00001",
         )
+        self.assertEqual(
+            extract_arxiv_id("https://doi.org/10.48550/arXiv.2604.08661"),
+            "2604.08661",
+        )
+
+    def test_direct_work_urls_try_datacite_then_abs_for_arxiv(self) -> None:
+        urls = direct_openalex_work_urls("https://arxiv.org/abs/2401.12345")
+        self.assertGreaterEqual(len(urls), 2)
+        self.assertIn("10.48550%2FarXiv.2401.12345", urls[0])
+        self.assertIn("arxiv.org%2Fabs%2F2401.12345", urls[1])
+
+    def test_direct_work_urls_dedupe_datacite_doi_link(self) -> None:
+        urls = direct_openalex_work_urls(
+            "https://doi.org/10.48550/arXiv.2604.08661"
+        )
+        self.assertEqual(len(urls), 2)
+        self.assertIn("10.48550%2FarXiv.2604.08661", urls[0])
 
     def test_extract_doi_from_link(self) -> None:
         self.assertEqual(

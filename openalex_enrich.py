@@ -7,7 +7,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import requests
 from pydantic import BaseModel, Field, ValidationError
@@ -26,6 +26,11 @@ _HTTP_HEADERS = {"User-Agent": "llm-rss/openalex-enrich"}
 
 _ARXIV_NEW = re.compile(
     r"arxiv\.org/(?:abs|pdf)/(?P<id>\d{4}\.\d{4,5})(?:v\d+)?",
+    re.IGNORECASE,
+)
+# arXiv DOIs minted by DataCite (common in RSS); OpenAlex often lacks /works/doi/... for new IDs.
+_ARXIV_DATACITE = re.compile(
+    r"(?:doi\.org/)?10\.48550/arXiv\.(?P<id>\d{4}\.\d{4,5})(?:v\d+)?",
     re.IGNORECASE,
 )
 _DOI = re.compile(r"(10\.\d{4,9}/[^\s?#%]+)", re.IGNORECASE)
@@ -218,17 +223,31 @@ def extract_doi_from_link(link: str) -> str | None:
 
 def extract_arxiv_id(link: str) -> str | None:
     m = _ARXIV_NEW.search(link)
+    if m:
+        return m.group("id")
+    m = _ARXIV_DATACITE.search(link)
     return m.group("id") if m else None
 
 
-def work_api_url_from_identifiers(link: str) -> str | None:
-    doi = extract_doi_from_link(link)
-    if doi:
-        return f"{OPENALEX_BASE}/works/https://doi.org/{doi}"
+def direct_openalex_work_urls(link: str) -> list[str]:
+    """Ordered /works/{url-encoded loc} URLs to try. DataCite arXiv DOIs are what OpenAlex indexes."""
+    seen_locs: set[str] = set()
+    out: list[str] = []
+
+    def add_loc(loc: str) -> None:
+        if loc in seen_locs:
+            return
+        seen_locs.add(loc)
+        out.append(f"{OPENALEX_BASE}/works/{quote(loc, safe='')}")
+
     arxiv_id = extract_arxiv_id(link)
     if arxiv_id:
-        return f"{OPENALEX_BASE}/works/https://doi.org/10.48550/arXiv.{arxiv_id}"
-    return None
+        add_loc(f"https://doi.org/10.48550/arXiv.{arxiv_id}")
+        add_loc(f"https://arxiv.org/abs/{arxiv_id}")
+    doi = extract_doi_from_link(link)
+    if doi:
+        add_loc(f"https://doi.org/{doi}")
+    return out
 
 
 def _authors_api_path(author_openalex_id_url: str) -> str:
@@ -245,16 +264,20 @@ def _get_json(url: str, mailto: str) -> Any | None:
         r = requests.get(
             url, params=params, timeout=25, headers=_HTTP_HEADERS
         )
+        if r.status_code == 404:
+            logger.debug(
+                "OpenAlex not found (404): %s", url.split("?", 1)[0]
+            )
+            return None
         r.raise_for_status()
         return r.json()
-    except Exception as e:
+    except requests.RequestException as e:
         logger.warning("OpenAlex request failed %s: %s", url, e)
         return None
 
 
 def fetch_work(article: ArticleInfo, mailto: str) -> Any | None:
-    direct = work_api_url_from_identifiers(str(article.link))
-    if direct:
+    for direct in direct_openalex_work_urls(str(article.link)):
         data = _get_json(direct, mailto)
         if data and data.get("id"):
             return data
