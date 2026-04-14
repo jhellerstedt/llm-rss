@@ -70,6 +70,27 @@ class TestZulipJournalSuggestionsLogic(unittest.TestCase):
         self.assertEqual(kept, ["science.org", "nature.com"])
         self.assertIn("science.org", reasons)
 
+    def test_kagi_filter_parsing_with_fences(self) -> None:
+        class FakeKagi:
+            def fastgpt_query(self, _prompt: str) -> str:
+                return (
+                    "```json\n"
+                    '{"academic_domains":["science.org"],"reasons":{"science.org":"publisher"}}'
+                    "\n```\n"
+                )
+
+        kept, _reasons = filter_academic_journal_domains_with_kagi(FakeKagi(), ["science.org"])
+        self.assertEqual(kept, ["science.org"])
+
+    def test_kagi_filter_empty_output(self) -> None:
+        class FakeKagi:
+            def fastgpt_query(self, _prompt: str) -> str:
+                return "   "
+
+        kept, reasons = filter_academic_journal_domains_with_kagi(FakeKagi(), ["science.org"])
+        self.assertEqual(kept, [])
+        self.assertEqual(reasons, {})
+
 
 if __name__ == "__main__":
     unittest.main()

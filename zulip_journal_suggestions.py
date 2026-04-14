@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from api_usage import record_zulip_api
+from fastgpt_reply import try_load_json_object_from_llm
 from zulip_context import _client_for_realm, domain_from_url, extract_urls_from_zulip_message_content
 from zulip_feedback import unique_realm_stream_pairs
 
@@ -64,11 +65,16 @@ def missing_domain_counts(
 
 def _parse_kagi_journal_domain_filter_response(text: str) -> tuple[set[str], dict[str, str]]:
     """Parse FastGPT JSON response into (allowed_domains, reason_by_domain)."""
-    obj = json.loads(text or "{}")
+    obj = try_load_json_object_from_llm(text or "")
+    if not isinstance(obj, dict):
+        return set(), {}
+
     allowed_raw = obj.get("academic_domains") or []
     if not isinstance(allowed_raw, list):
         allowed_raw = []
-    allowed: set[str] = {str(d).strip().lower().removeprefix("www.") for d in allowed_raw if str(d).strip()}
+    allowed: set[str] = {
+        str(d).strip().lower().removeprefix("www.") for d in allowed_raw if str(d).strip()
+    }
 
     reasons: dict[str, str] = {}
     reasons_raw = obj.get("reasons") or {}
@@ -109,7 +115,18 @@ def filter_academic_journal_domains_with_kagi(
         f"Domains:\n{json.dumps(uniq)}\n"
     )
     text = kagi.fastgpt_query(prompt)
+    if not (text or "").strip():
+        logger.warning("Kagi journal-domain filter returned empty output")
+        return [], {}
+
     allowed, reasons = _parse_kagi_journal_domain_filter_response(text)
+    if not allowed:
+        logger.warning(
+            "Kagi journal-domain filter parse miss or empty allowlist; snippet=%s",
+            (text or "")[:400],
+        )
+        return [], {}
+
     kept = [d for d in uniq if d in allowed]
     kept_reasons = {d: reasons.get(d, "") for d in kept if reasons.get(d)}
     return kept, kept_reasons
