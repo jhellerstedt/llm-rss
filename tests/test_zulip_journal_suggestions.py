@@ -4,6 +4,7 @@ from zulip_context import domain_from_url, extract_urls_from_zulip_message_conte
 from zulip_journal_suggestions import (
     DEFAULT_DOMAIN_DENYLIST,
     domain_counts_from_zulip_messages,
+    filter_academic_journal_domains_with_kagi,
     format_missing_journals_message,
     missing_domain_counts,
     tracked_domains_from_group_urls,
@@ -56,6 +57,18 @@ class TestZulipJournalSuggestionsLogic(unittest.TestCase):
         self.assertIn("science.org", body)
         self.assertIn("(links: 2)", body)
         self.assertIn("urls = [...]", body)
+
+    def test_kagi_filter_parsing(self) -> None:
+        class FakeKagi:
+            def fastgpt_query(self, _prompt: str) -> str:
+                return '{"academic_domains":["science.org","www.nature.com"],"reasons":{"science.org":"publisher","nature.com":"journal"}}'
+
+        kept, reasons = filter_academic_journal_domains_with_kagi(
+            FakeKagi(),
+            ["science.org", "arxiv.org", "www.nature.com"],
+        )
+        self.assertEqual(kept, ["science.org", "nature.com"])
+        self.assertIn("science.org", reasons)
 
 
 if __name__ == "__main__":

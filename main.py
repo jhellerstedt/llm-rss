@@ -34,6 +34,7 @@ from zulip_feedback import (
 from zulip_journal_suggestions import (
     DEFAULT_DOMAIN_DENYLIST,
     domain_counts_from_zulip_messages,
+    filter_academic_journal_domains_with_kagi,
     format_missing_journals_message,
     missing_domain_counts,
     post_missing_journals_suggestions,
@@ -208,23 +209,7 @@ def process_group(
                 kagi_summarize=kagi,
             )
 
-            # Post suggestions for journal domains linked in Zulip but not tracked in config.
-            tracked = tracked_domains_from_group_urls([str(u) for u in (group.get("urls") or [])])
-            zulip_counts = domain_counts_from_zulip_messages(
-                zulip_msgs, denylist=DEFAULT_DOMAIN_DENYLIST
-            )
-            missing = missing_domain_counts(
-                tracked_domains=tracked,
-                zulip_domain_counts=zulip_counts,
-            )
-            if missing:
-                body = format_missing_journals_message(missing)
-                post_missing_journals_suggestions(
-                    zulip_sources=zulip_sources,
-                    zulip_realms=zulip_realms,
-                    message=body,
-                    dryrun=dryrun,
-                )
+            # Journal suggestions are posted once per run (see main()).
 
     feedback_signals: dict[str, tuple[int, int]] = {}
     feedback_msgs_by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -466,6 +451,9 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         kagi_cfg = cfg.get("kagi") or {}
         pf_cap = int(kagi_cfg.get("prefilter_max_candidates", 20))
         batch_sz = int(kagi_cfg.get("scoring_batch_size", 5))
+
+        # Aggregate journal suggestions across the full run to avoid repeated posts per group.
+        suggestions_by_pair: dict[tuple[str, str], dict[str, int]] = {}
         for group in groups:
             print(f"--- Group: {group['name']} ---")
             process_group(
@@ -478,6 +466,64 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 kagi_prefilter_cap=pf_cap,
                 kagi_batch_size=batch_sz,
             )
+
+            # Collect per-group missing domains to a run-level accumulator.
+            zulip_sources = group.get("zulip_sources") or []
+            if not zulip_sources or not zulip_realms:
+                continue
+            # NOTE: We recompute from group-level zulip context already fetched inside process_group
+            # would be more efficient if process_group returned it; keeping simple for now.
+            # Fetch messages again but with same limits; still one message post per run after this loop.
+            try:
+                context_max_chars = int((zulip_cfg or {}).get("context_max_chars", 12_000))
+                _block, msgs = build_zulip_context_and_messages(
+                    zulip_sources,
+                    zulip_realms,
+                    context_max_chars,
+                    kagi_summarize=None,
+                )
+            except Exception:
+                logger.exception("Failed to refetch Zulip messages for journal suggestions")
+                continue
+
+            tracked = tracked_domains_from_group_urls([str(u) for u in (group.get("urls") or [])])
+            zulip_counts = domain_counts_from_zulip_messages(msgs, denylist=DEFAULT_DOMAIN_DENYLIST)
+            missing = missing_domain_counts(
+                tracked_domains=tracked,
+                zulip_domain_counts=zulip_counts,
+            )
+            if not missing:
+                continue
+            # Merge missing counts into each unique realm/stream destination for this group.
+            from zulip_feedback import unique_realm_stream_pairs
+
+            for pair in unique_realm_stream_pairs(zulip_sources):
+                bucket = suggestions_by_pair.setdefault(pair, {})
+                for d, c in missing.items():
+                    bucket[d] = bucket.get(d, 0) + int(c)
+
+        # Single Kagi API call to filter domains, then post once per destination stream for the run.
+        if suggestions_by_pair and kagi:
+            all_domains: list[str] = sorted({d for m in suggestions_by_pair.values() for d in m})
+            try:
+                allowed, _reasons = filter_academic_journal_domains_with_kagi(kagi, all_domains)
+                allowed_set = set(allowed)
+            except Exception:
+                logger.exception("Kagi journal-domain filter failed; skipping journal suggestions post")
+                allowed_set = set()
+
+            if allowed_set:
+                for (realm, stream), dom_counts in suggestions_by_pair.items():
+                    filtered_counts = {d: c for d, c in dom_counts.items() if d in allowed_set}
+                    if not filtered_counts:
+                        continue
+                    body = format_missing_journals_message(filtered_counts)
+                    post_missing_journals_suggestions(
+                        zulip_sources=[{"realm": realm, "stream": stream}],
+                        zulip_realms=zulip_realms,
+                        message=body,
+                        dryrun=dryrun,
+                    )
     finally:
         log_api_usage_summary(logger)
         log_kagi_quota_status(logger)

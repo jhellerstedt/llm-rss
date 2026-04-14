@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from typing import Any
 
 from api_usage import record_zulip_api
@@ -59,6 +60,59 @@ def missing_domain_counts(
     zulip_domain_counts: dict[str, int],
 ) -> dict[str, int]:
     return {d: c for d, c in zulip_domain_counts.items() if d not in tracked_domains}
+
+
+def _parse_kagi_journal_domain_filter_response(text: str) -> tuple[set[str], dict[str, str]]:
+    """Parse FastGPT JSON response into (allowed_domains, reason_by_domain)."""
+    obj = json.loads(text or "{}")
+    allowed_raw = obj.get("academic_domains") or []
+    if not isinstance(allowed_raw, list):
+        allowed_raw = []
+    allowed: set[str] = {str(d).strip().lower().removeprefix("www.") for d in allowed_raw if str(d).strip()}
+
+    reasons: dict[str, str] = {}
+    reasons_raw = obj.get("reasons") or {}
+    if isinstance(reasons_raw, dict):
+        for k, v in reasons_raw.items():
+            dk = str(k).strip().lower().removeprefix("www.")
+            if not dk:
+                continue
+            reasons[dk] = str(v).strip()
+    return allowed, reasons
+
+
+def filter_academic_journal_domains_with_kagi(
+    kagi,
+    domains: list[str],
+) -> tuple[list[str], dict[str, str]]:
+    """One FastGPT call to filter domains to academic journal/publisher sites."""
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for d in domains:
+        dd = str(d).strip().lower()
+        if dd.startswith("www."):
+            dd = dd[4:]
+        if dd and dd not in seen:
+            seen.add(dd)
+            uniq.append(dd)
+    if not uniq:
+        return [], {}
+
+    prompt = (
+        "You are helping curate RSS sources for academic journals.\n"
+        "Given this list of web domains, return ONLY the ones that are academic journals or "
+        "academic publishers that publish research articles (not preprint servers, DOI resolvers, "
+        "social media, code hosting, video sites, aggregators, or general news).\n\n"
+        "Return ONLY a single JSON object with keys:\n"
+        '- "academic_domains": array of domains to keep (strings)\n'
+        '- "reasons": object mapping domain -> short reason (optional)\n\n'
+        f"Domains:\n{json.dumps(uniq)}\n"
+    )
+    text = kagi.fastgpt_query(prompt)
+    allowed, reasons = _parse_kagi_journal_domain_filter_response(text)
+    kept = [d for d in uniq if d in allowed]
+    kept_reasons = {d: reasons.get(d, "") for d in kept if reasons.get(d)}
+    return kept, kept_reasons
 
 
 def format_missing_journals_message(missing: dict[str, int]) -> str:
