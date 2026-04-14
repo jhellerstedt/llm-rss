@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from api_usage import record_kagi_fastgpt_http, record_kagi_summarize_http
+from kagi_quota import consume_kagi_invocation
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,8 @@ class KagiClient:
             raise last_exc
         raise RuntimeError("Kagi request failed after retries")
 
-    def fastgpt_query(self, query: str) -> str:
+    def fastgpt_query(self, query: str, *, openalex_fallback: bool = False) -> str:
+        consume_kagi_invocation(kind="fastgpt", openalex_fallback=openalex_fallback)
         payload: dict[str, Any] = {
             "query": query,
             "web_search": self.web_search,
@@ -164,6 +166,7 @@ class KagiClient:
         return out
 
     def summarize(self, text: str, summary_type: str = "summary") -> str:
+        consume_kagi_invocation(kind="summarize")
         payload: dict[str, Any] = {
             "text": text,
             "engine": self.summarize_engine,

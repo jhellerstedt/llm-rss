@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 from adapter import ArticleInfo
 from api_usage import record_openalex_http
 from fastgpt_reply import try_load_json_object_from_llm
+from kagi_quota import KagiOpenAlexFallbackQuotaExceeded, KagiSessionQuotaExceeded
 
 if TYPE_CHECKING:
     from kagi_client import KagiClient
@@ -159,8 +160,15 @@ If there is only one author, repeat the same institution in both institution fie
 Example: {{"top_author_name": "...", "top_author_h_index": 12, "first_author_institution": "...", "last_author_institution": "..."}}
 """
     try:
-        raw = kagi.fastgpt_query(query)
+        raw = kagi.fastgpt_query(query, openalex_fallback=True)
     except Exception as e:
+        if isinstance(e, (KagiOpenAlexFallbackQuotaExceeded, KagiSessionQuotaExceeded)):
+            logger.info(
+                "Skipping Kagi metadata for %r: %s",
+                article.title[:60],
+                e,
+            )
+            return None
         logger.warning("Kagi metadata query failed for %r: %s", article.title[:60], e)
         return None
     data = try_load_json_object_from_llm(raw)

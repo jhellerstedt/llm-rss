@@ -167,7 +167,7 @@ class TestMergeAndFallback(unittest.TestCase):
         by_link: dict[str, PaperEnrichment | None] = {str(art.link): None}
 
         class FakeKagi:
-            def fastgpt_query(self, query: str) -> str:
+            def fastgpt_query(self, query: str, **kwargs: object) -> str:
                 return (
                     '{"top_author_name": "Zed", "top_author_h_index": 3, '
                     '"first_author_institution": "U1", "last_author_institution": "U2"}'

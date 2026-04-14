@@ -20,6 +20,7 @@ from openalex_enrich import (
     format_enrichment_for_feed,
 )
 from api_usage import log_api_usage_summary, reset_api_usage_stats
+from kagi_quota import log_kagi_quota_status, reset_kagi_session_quota
 from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history
 from zulip_context import build_zulip_context_block, load_zulip_realms
 from zulip_feedback import (
@@ -348,6 +349,7 @@ def process_group(
 
 def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
     reset_api_usage_stats()
+    reset_kagi_session_quota()
     try:
         cfg = toml.load(config_path)
         openalex_cfg = dict(cfg.get("openalex") or {})
@@ -377,6 +379,7 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
             process_group(group, kagi, zulip_realms, zulip_cfg, openalex_cfg, dryrun)
     finally:
         log_api_usage_summary(logger)
+        log_kagi_quota_status(logger)
 
 
 def _main(
