@@ -4,7 +4,7 @@ import json
 import logging
 import re
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +14,8 @@ _BAD_UNICODE_ESCAPE = re.compile(r"""\\u(?![0-9a-fA-F]{4})""")
 
 
 class Reply(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     relevance: int
     impact: int
     reason: str | None = None
@@ -50,6 +52,34 @@ def try_load_json_object_from_llm(text: str) -> dict | None:
             return data if isinstance(data, dict) else None
         except json.JSONDecodeError:
             return None
+
+
+def parse_batch_replies_from_fastgpt_output(
+    text: str, expected_ids: list[str]
+) -> dict[str, Reply]:
+    """Parse a JSON object mapping batch ids (e.g. A1, A2) to relevance/impact objects."""
+    raw = extract_json_object(text)
+    out: dict[str, Reply] = {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            data = json.loads(_sanitize_invalid_json_escapes(raw))
+        except json.JSONDecodeError:
+            logger.warning("Batch JSON decode failed; snippet=%s", text[:400])
+            return out
+    if not isinstance(data, dict):
+        logger.warning("Batch scoring expected JSON object, got %s", type(data))
+        return out
+    for bid in expected_ids:
+        val = data.get(bid)
+        if not isinstance(val, dict):
+            continue
+        try:
+            out[bid] = Reply.model_validate(val)
+        except (ValueError, TypeError):
+            logger.warning("Batch item %r invalid: %s", bid, val)
+    return out
 
 
 def parse_reply_from_fastgpt_output(text: str, article_title: str) -> Reply:

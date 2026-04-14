@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from adapter import ArticleInfo, RSSAdapter
+from article_prefilter import shortlist_for_kagi_scoring
 from fastgpt_reply import Reply, parse_reply_from_fastgpt_output
 from kagi_client import KagiClient, DEFAULT_FASTGPT_URL, DEFAULT_SUMMARIZE_URL
 from openalex_enrich import (
@@ -20,8 +21,9 @@ from openalex_enrich import (
     format_enrichment_for_feed,
 )
 from api_usage import log_api_usage_summary, reset_api_usage_stats
-from kagi_quota import log_kagi_quota_status, reset_kagi_session_quota
-from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history
+from kagi_batch_scoring import score_article_batch_with_kagi
+from kagi_quota import log_kagi_quota_status, plan_scoring_budget, reset_kagi_session_quota
+from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history, normalize_link
 from zulip_context import build_zulip_context_block, load_zulip_realms
 from zulip_feedback import (
     format_feedback_prompt_snippet,
@@ -133,6 +135,8 @@ def expand_groups(cfg: dict) -> list[dict]:
                 "concurrent_requests": g.get("concurrent_requests", cfg.get("concurrent_requests")),
                 "crawl_abstract": g.get("crawl_abstract", cfg.get("crawl_abstract", False)),
                 "zulip_sources": g.get("zulip_sources", []),
+                "prefilter_max_candidates": g.get("prefilter_max_candidates"),
+                "scoring_batch_size": g.get("scoring_batch_size"),
             }
             groups.append(entry)
         return groups
@@ -161,12 +165,14 @@ def process_group(
     zulip_cfg: dict,
     openalex_cfg: dict,
     dryrun: bool,
+    *,
+    kagi_prefilter_cap: int = 20,
+    kagi_batch_size: int = 5,
 ) -> None:
     rss_path = group["rss_path"]
     period = group["period"]
     relevance_threshold = group["relevance_threshold"]
     impact_threshold = group["impact_threshold"]
-    concurrent_requests = group["concurrent_requests"]
     crawl_abstract = group["crawl_abstract"]
     group_name = group["name"]
     openalex_enabled = bool(openalex_cfg.get("enabled", True))
@@ -221,26 +227,82 @@ def process_group(
     for crawler in tqdm(crawlers, desc="waiting for crawlers"):
         crawler.result()
 
-    if concurrent_requests is None:
-        # Match Kagi throttling: extra threads would only block on the client semaphore.
-        concurrent_requests = min(
-            kagi.max_concurrent_api_requests,
-            max(1, len(recent_articles)),
+    cap = int(group.get("prefilter_max_candidates") or kagi_prefilter_cap)
+    bsz = int(group.get("scoring_batch_size") or kagi_batch_size)
+    n_art = len(recent_articles)
+    shortlist_n, batch_sz = plan_scoring_budget(
+        n_art,
+        prefilter_cap=cap,
+        batch_size=bsz,
+    )
+    if shortlist_n == 0 and n_art > 0:
+        logger.warning(
+            "[%s] Kagi scoring shortlist empty (quota/reserve); all articles get score 0",
+            group_name,
         )
+    shortlisted = shortlist_for_kagi_scoring(
+        recent_articles,
+        group,
+        shortlist_n,
+        feedback_signals or None,
+    )
+    shortlisted_norm = {normalize_link(str(a.link)) for a in shortlisted}
+    logger.info(
+        "[%s] Kagi batched scoring: shortlist %d/%d, batch_size=%d",
+        group_name,
+        len(shortlisted),
+        n_art,
+        batch_sz,
+    )
 
-    def worker(art: ArticleInfo) -> Reply:
-        fb = format_feedback_prompt_snippet(str(art.link), feedback_signals)
-        return get_kagi_reply(art, group, kagi, zulip_block, feedback_snippet=fb)
+    link_to_reply: dict[str, Reply] = {}
+    for art in recent_articles:
+        if normalize_link(str(art.link)) not in shortlisted_norm:
+            link_to_reply[str(art.link)] = Reply(
+                relevance=0,
+                impact=0,
+                reason="not shortlisted for Kagi scoring",
+            )
 
-    with ThreadPoolExecutor(max_workers=max(1, concurrent_requests)) as pool:
-        futures = [pool.submit(worker, art) for art in recent_articles]
-        replies: list[Reply] = []
-        for f in tqdm(futures, desc=f"Kagi FastGPT ({group_name})"):
-            try:
-                replies.append(f.result())
-            except Exception as e:
-                logger.warning("FastGPT worker failed: %s", e)
-                replies.append(Reply(relevance=0, impact=0, reason="worker error"))
+    for i in tqdm(
+        range(0, len(shortlisted), batch_sz),
+        desc=f"Kagi FastGPT batches ({group_name})",
+    ):
+        chunk = shortlisted[i : i + batch_sz]
+        batch_items: list[tuple[str, ArticleInfo, str]] = []
+        for j, art in enumerate(chunk):
+            bid = f"A{j + 1}"
+            fb = format_feedback_prompt_snippet(str(art.link), feedback_signals)
+            batch_items.append((bid, art, fb))
+        try:
+            parsed = score_article_batch_with_kagi(
+                kagi, batch_items, group, zulip_block
+            )
+        except Exception as e:
+            logger.warning("Kagi batch scoring failed: %s", e)
+            parsed = {}
+        for bid, art, _ in batch_items:
+            r = parsed.get(bid)
+            if r is None:
+                try:
+                    fb = format_feedback_prompt_snippet(str(art.link), feedback_signals)
+                    r = get_kagi_reply(art, group, kagi, zulip_block, feedback_snippet=fb)
+                except Exception as e2:
+                    logger.warning("Kagi single-article fallback failed: %s", e2)
+                    r = Reply(
+                        relevance=0,
+                        impact=0,
+                        reason="batch parse miss and fallback failed",
+                    )
+            link_to_reply[str(art.link)] = r
+
+    replies: list[Reply] = [
+        link_to_reply.get(
+            str(art.link),
+            Reply(relevance=0, impact=0, reason="missing reply"),
+        )
+        for art in recent_articles
+    ]
 
     passing: list[tuple[ArticleInfo, Reply]] = [
         (article, reply)
@@ -374,9 +436,21 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         )
 
         groups = expand_groups(cfg)
+        kagi_cfg = cfg.get("kagi") or {}
+        pf_cap = int(kagi_cfg.get("prefilter_max_candidates", 20))
+        batch_sz = int(kagi_cfg.get("scoring_batch_size", 5))
         for group in groups:
             print(f"--- Group: {group['name']} ---")
-            process_group(group, kagi, zulip_realms, zulip_cfg, openalex_cfg, dryrun)
+            process_group(
+                group,
+                kagi,
+                zulip_realms,
+                zulip_cfg,
+                openalex_cfg,
+                dryrun,
+                kagi_prefilter_cap=pf_cap,
+                kagi_batch_size=batch_sz,
+            )
     finally:
         log_api_usage_summary(logger)
         log_kagi_quota_status(logger)

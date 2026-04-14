@@ -13,6 +13,8 @@ _openalex_fallback_fastgpt_used: int = 0
 
 MAX_KAGI_INVOCATIONS_PER_RUN: int = 70
 MAX_OPENALEX_FALLBACK_FASTGPT_PER_RUN: int = 5
+# Worst-case slots to leave for post-scoring Kagi (OpenAlex metadata + margin).
+DEFAULT_RESERVE_AFTER_SCORING: int = 7
 
 
 class KagiSessionQuotaExceeded(RuntimeError):
@@ -55,6 +57,35 @@ def consume_kagi_invocation(
                 )
             _openalex_fallback_fastgpt_used += 1
         _kagi_invocations_used += 1
+
+
+def remaining_kagi_invocations() -> int:
+    """Fastgpt + summarize slots still available this run."""
+    with _lock:
+        return max(0, MAX_KAGI_INVOCATIONS_PER_RUN - _kagi_invocations_used)
+
+
+def plan_scoring_budget(
+    n_articles: int,
+    *,
+    prefilter_cap: int,
+    batch_size: int,
+    reserve_after_scoring: int = DEFAULT_RESERVE_AFTER_SCORING,
+) -> tuple[int, int]:
+    """Pick shortlist length and batch size so batch count fits remaining Kagi budget.
+
+    Returns ``(shortlist_len, batch_size)``. ``shortlist_len`` may be 0 if no budget.
+    """
+    bs = max(1, int(batch_size))
+    budget = remaining_kagi_invocations() - int(reserve_after_scoring)
+    if n_articles <= 0 or budget <= 0:
+        return 0, bs
+    max_shortlist_by_budget = budget * bs
+    shortlist = min(int(prefilter_cap), n_articles, max_shortlist_by_budget)
+    batches_needed = (shortlist + bs - 1) // bs if shortlist else 0
+    if batches_needed > budget:
+        shortlist = max(0, budget * bs)
+    return shortlist, bs
 
 
 def log_kagi_quota_status(logger: logging.Logger | None = None) -> None:

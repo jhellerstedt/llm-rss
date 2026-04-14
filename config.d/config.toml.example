@@ -12,6 +12,9 @@ use_cache = true
 max_concurrent_api_requests = 2
 # Retries per request (429 / transient 5xx)
 max_http_attempts = 12
+# Local keyword shortlist before Kagi; articles are scored in batches (fewer FastGPT calls).
+prefilter_max_candidates = 20
+scoring_batch_size = 5
 
 # OpenAlex metadata for feed items (h-index, first/last author affiliations).
 # Set mailto so OpenAlex can contact you if needed (also configurable via OPENALEX_MAILTO).
