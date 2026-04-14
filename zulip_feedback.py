@@ -11,6 +11,8 @@ from zulip_context import fetch_messages_narrow, strip_zulip_html, _client_for_r
 logger = logging.getLogger(__name__)
 
 FEEDBACK_RANKING_TOPIC = "feedback ranking"
+# Per process_group run, at most this many new messages per group (best by relevance, then impact).
+MAX_FEEDBACK_RANKING_POSTS_PER_GROUP = 2
 _LINK_LINE = re.compile(r"(?im)^\s*Link:\s*(.+?)\s*$")
 
 
@@ -132,6 +134,31 @@ def format_feedback_post_body(title: str, link: str) -> str:
     return f"{title.strip()}\n\nLink: {link.strip()}"
 
 
+def select_top_ranked_for_feedback_posts(
+    title_link_scores: list[tuple[str, str, int, int]],
+    *,
+    max_posts: int = MAX_FEEDBACK_RANKING_POSTS_PER_GROUP,
+) -> list[tuple[str, str]]:
+    """Pick up to ``max_posts`` items with highest (relevance, impact), unique by normalized link."""
+    if max_posts <= 0:
+        return []
+    ranked = sorted(
+        title_link_scores,
+        key=lambda t: (-t[2], -t[3]),
+    )
+    out: list[tuple[str, str]] = []
+    seen_keys: set[str] = set()
+    for title, link, _rel, _imp in ranked:
+        key = normalize_link(link)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append((title, link))
+        if len(out) >= max_posts:
+            break
+    return out
+
+
 def load_feedback_state_for_group(
     zulip_sources: list[dict[str, Any]],
     zulip_realms: dict[str, dict[str, str]],
@@ -167,9 +194,19 @@ def post_feedback_ranking_for_new_items(
     messages_by_pair: dict[tuple[str, str], list[dict[str, Any]]],
     titles_and_links: list[tuple[str, str]],
     dryrun: bool,
+    max_sends_per_group: int = MAX_FEEDBACK_RANKING_POSTS_PER_GROUP,
 ) -> None:
-    """Post one message per (realm, stream, article) for items not already in that topic."""
+    """Post messages for ``titles_and_links`` where the link is not already in that topic.
+
+    At most ``max_sends_per_group`` successful sends **across all** realm/stream pairs
+    (first matching destinations in stable pair order consume the budget).
+    """
+    if not titles_and_links or max_sends_per_group <= 0:
+        return
+    sends_left = max_sends_per_group
     for realm, stream in unique_realm_stream_pairs(zulip_sources):
+        if sends_left <= 0:
+            break
         msgs = messages_by_pair.get((realm, stream), [])
         posted = links_announced_in_messages(msgs)
         try:
@@ -178,6 +215,8 @@ def post_feedback_ranking_for_new_items(
             logger.error("%s", e)
             continue
         for title, link in titles_and_links:
+            if sends_left <= 0:
+                return
             key = normalize_link(link)
             if key in posted:
                 continue
@@ -190,6 +229,7 @@ def post_feedback_ranking_for_new_items(
                     key[:80],
                 )
                 posted.add(key)
+                sends_left -= 1
                 continue
             try:
                 result = client.send_message(
@@ -209,6 +249,7 @@ def post_feedback_ranking_for_new_items(
                     )
                     continue
                 posted.add(key)
+                sends_left -= 1
             except Exception:
                 logger.exception(
                     "Zulip post feedback failed realm=%s stream=%s", realm, stream

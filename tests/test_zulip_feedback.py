@@ -11,6 +11,7 @@ from zulip_feedback import (
     lookback_max_for_pair,
     merge_signal_maps,
     parse_feedback_link_from_body,
+    select_top_ranked_for_feedback_posts,
     unique_realm_stream_pairs,
 )
 
@@ -114,6 +115,36 @@ class TestZulipFeedbackSources(unittest.TestCase):
             {"realm": "a", "stream": "x", "lookback_hours": 200, "max_messages": 50},
         ]
         self.assertEqual(lookback_max_for_pair(sources, "a", "x"), (200, 100))
+
+
+class TestSelectTopRankedForFeedback(unittest.TestCase):
+    def test_picks_two_best_by_relevance_then_impact(self) -> None:
+        rows = [
+            ("Low", "https://a.org/1", 6, 9),
+            ("High rel", "https://a.org/2", 9, 3),
+            ("Mid", "https://a.org/3", 8, 8),
+            ("Tie rel lower imp", "https://a.org/4", 9, 2),
+        ]
+        picked = select_top_ranked_for_feedback_posts(rows, max_posts=2)
+        self.assertEqual(len(picked), 2)
+        self.assertEqual(picked[0][1], "https://a.org/2")
+        self.assertEqual(picked[1][1], "https://a.org/4")
+
+    def test_same_link_once(self) -> None:
+        rows = [
+            ("A", "https://x.org/p", 9, 9),
+            ("B", "https://x.org/p/", 8, 8),
+        ]
+        picked = select_top_ranked_for_feedback_posts(rows, max_posts=2)
+        self.assertEqual(len(picked), 1)
+
+    def test_max_posts_zero(self) -> None:
+        self.assertEqual(
+            select_top_ranked_for_feedback_posts(
+                [("a", "https://z.org", 9, 9)], max_posts=0
+            ),
+            [],
+        )
 
 
 class TestZulipFeedbackPrompt(unittest.TestCase):

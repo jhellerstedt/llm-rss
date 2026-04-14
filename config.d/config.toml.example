@@ -51,9 +51,12 @@ impact_threshold = 3
 
 # Optional: pull discussion context from Zulip (requires zulip_realms.json or env realms).
 # Each row's optional "topic" / lookback only affect discussion context, not feedback.
-# When zulip_sources is set, the bot also posts each newly recommended article (one message
-# per paper) to the same realm+stream under the topic "feedback ranking", and reads
-# :thumbs_up: / :thumbs_down: reactions there to inform later scoring runs.
+# When zulip_sources is set, the bot also posts at most two Zulip messages per group run
+# total (the two highest-ranked passing papers by relevance then impact; skips links already
+# present in each stream's "feedback ranking" topic). If you list multiple realm/stream rows,
+# the budget is shared across them (earlier rows in config order are tried first). Those
+# messages live on each row's realm+stream under topic "feedback ranking"; :thumbs_up: /
+# :thumbs_down: reactions there inform later scoring runs.
 # zulip_sources = [
 #   { realm = "myrealm", stream = "papers", lookback_hours = 168, max_messages = 400 },
 #   { realm = "myrealm", stream = "lab", topic = "reading", lookback_hours = 72, max_messages = 200 },

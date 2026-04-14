@@ -25,6 +25,7 @@ from zulip_feedback import (
     format_feedback_prompt_snippet,
     load_feedback_state_for_group,
     post_feedback_ranking_for_new_items,
+    select_top_ranked_for_feedback_posts,
 )
 
 load_dotenv()
@@ -284,14 +285,23 @@ def process_group(
             )
         )
 
-    if zulip_sources and zulip_realms and new_items:
-        post_feedback_ranking_for_new_items(
-            zulip_sources,
-            zulip_realms,
-            messages_by_pair=feedback_msgs_by_pair,
-            titles_and_links=[(it.title, it.link) for it in new_items],
-            dryrun=dryrun,
+    if zulip_sources and zulip_realms and passing:
+        feedback_post_links = select_top_ranked_for_feedback_posts(
+            [(a.title, str(a.link), r.relevance, r.impact) for a, r in passing],
         )
+        if feedback_post_links:
+            logger.info(
+                "Zulip feedback ranking: posting up to %d article(s) for group %s (by relevance, impact)",
+                len(feedback_post_links),
+                group_name,
+            )
+            post_feedback_ranking_for_new_items(
+                zulip_sources,
+                zulip_realms,
+                messages_by_pair=feedback_msgs_by_pair,
+                titles_and_links=feedback_post_links,
+                dryrun=dryrun,
+            )
 
     n_scored = len(recent_articles)
     n_new_this_run = len(new_items)
