@@ -24,12 +24,20 @@ from api_usage import log_api_usage_summary, reset_api_usage_stats
 from kagi_batch_scoring import score_article_batch_with_kagi
 from kagi_quota import log_kagi_quota_status, plan_scoring_budget, reset_kagi_session_quota
 from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history, normalize_link
-from zulip_context import build_zulip_context_block, load_zulip_realms
+from zulip_context import build_zulip_context_and_messages, load_zulip_realms
 from zulip_feedback import (
     format_feedback_prompt_snippet,
     load_feedback_state_for_group,
     post_feedback_ranking_for_new_items,
     select_top_ranked_for_feedback_posts,
+)
+from zulip_journal_suggestions import (
+    DEFAULT_DOMAIN_DENYLIST,
+    domain_counts_from_zulip_messages,
+    format_missing_journals_message,
+    missing_domain_counts,
+    post_missing_journals_suggestions,
+    tracked_domains_from_group_urls,
 )
 
 load_dotenv()
@@ -185,6 +193,7 @@ def process_group(
     zulip_sources = group.get("zulip_sources") or []
 
     zulip_block = ""
+    zulip_msgs: list[dict[str, Any]] = []
     if zulip_sources:
         if not zulip_realms:
             logger.warning(
@@ -192,12 +201,30 @@ def process_group(
                 group_name,
             )
         else:
-            zulip_block = build_zulip_context_block(
+            zulip_block, zulip_msgs = build_zulip_context_and_messages(
                 zulip_sources,
                 zulip_realms,
                 context_max_chars,
                 kagi_summarize=kagi,
             )
+
+            # Post suggestions for journal domains linked in Zulip but not tracked in config.
+            tracked = tracked_domains_from_group_urls([str(u) for u in (group.get("urls") or [])])
+            zulip_counts = domain_counts_from_zulip_messages(
+                zulip_msgs, denylist=DEFAULT_DOMAIN_DENYLIST
+            )
+            missing = missing_domain_counts(
+                tracked_domains=tracked,
+                zulip_domain_counts=zulip_counts,
+            )
+            if missing:
+                body = format_missing_journals_message(missing)
+                post_missing_journals_suggestions(
+                    zulip_sources=zulip_sources,
+                    zulip_realms=zulip_realms,
+                    message=body,
+                    dryrun=dryrun,
+                )
 
     feedback_signals: dict[str, tuple[int, int]] = {}
     feedback_msgs_by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
