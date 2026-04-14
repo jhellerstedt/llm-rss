@@ -13,6 +13,7 @@ import requests
 from pydantic import BaseModel, Field, ValidationError
 
 from adapter import ArticleInfo
+from api_usage import record_openalex_http
 from fastgpt_reply import try_load_json_object_from_llm
 
 if TYPE_CHECKING:
@@ -240,6 +241,7 @@ def _get_json(url: str, mailto: str) -> Any | None:
     if mailto:
         params["mailto"] = mailto
     try:
+        record_openalex_http(1)
         r = requests.get(
             url, params=params, timeout=25, headers=_HTTP_HEADERS
         )
@@ -264,6 +266,7 @@ def fetch_work(article: ArticleInfo, mailto: str) -> Any | None:
     if mailto:
         params["mailto"] = mailto
     try:
+        record_openalex_http(1)
         r = requests.get(
             f"{OPENALEX_BASE}/works",
             params=params,

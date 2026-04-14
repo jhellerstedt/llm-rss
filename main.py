@@ -19,6 +19,7 @@ from openalex_enrich import (
     batch_enrich_articles,
     format_enrichment_for_feed,
 )
+from api_usage import log_api_usage_summary, reset_api_usage_stats
 from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history
 from zulip_context import build_zulip_context_block, load_zulip_realms
 from zulip_feedback import (
@@ -346,28 +347,36 @@ def process_group(
 
 
 def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
-    cfg = toml.load(config_path)
-    openalex_cfg = dict(cfg.get("openalex") or {})
-    kagi_table = cfg.get("kagi") or {}
-    kagi = make_kagi_client(kagi_table)
-    if not kagi.api_key:
-        raise ValueError("Kagi API key missing: set [kagi] api_key or environment variable KAGI_API_KEY")
+    reset_api_usage_stats()
+    try:
+        cfg = toml.load(config_path)
+        openalex_cfg = dict(cfg.get("openalex") or {})
+        kagi_table = cfg.get("kagi") or {}
+        kagi = make_kagi_client(kagi_table)
+        if not kagi.api_key:
+            raise ValueError(
+                "Kagi API key missing: set [kagi] api_key or environment variable KAGI_API_KEY"
+            )
 
-    zulip_cfg = cfg.get("zulip") or {}
-    realms_path_cfg = zulip_cfg.get("realms_config_file")
-    if realms_path_cfg:
-        rp = Path(realms_path_cfg)
-        if not rp.is_absolute():
-            rp = (config_path.parent / rp).resolve()
-        realms_path = str(rp)
-    else:
-        realms_path = os.environ.get("ZULIP_REALMS_CONFIG_FILE")
-    zulip_realms = load_zulip_realms(config_file=realms_path, config_dir=config_path.parent)
+        zulip_cfg = cfg.get("zulip") or {}
+        realms_path_cfg = zulip_cfg.get("realms_config_file")
+        if realms_path_cfg:
+            rp = Path(realms_path_cfg)
+            if not rp.is_absolute():
+                rp = (config_path.parent / rp).resolve()
+            realms_path = str(rp)
+        else:
+            realms_path = os.environ.get("ZULIP_REALMS_CONFIG_FILE")
+        zulip_realms = load_zulip_realms(
+            config_file=realms_path, config_dir=config_path.parent
+        )
 
-    groups = expand_groups(cfg)
-    for group in groups:
-        print(f"--- Group: {group['name']} ---")
-        process_group(group, kagi, zulip_realms, zulip_cfg, openalex_cfg, dryrun)
+        groups = expand_groups(cfg)
+        for group in groups:
+            print(f"--- Group: {group['name']} ---")
+            process_group(group, kagi, zulip_realms, zulip_cfg, openalex_cfg, dryrun)
+    finally:
+        log_api_usage_summary(logger)
 
 
 def _main(

@@ -10,6 +10,8 @@ from typing import Any
 
 import requests
 
+from api_usage import record_kagi_fastgpt_http, record_kagi_summarize_http
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_FASTGPT_URL = "https://kagi.com/api/v0/fastgpt"
@@ -94,6 +96,10 @@ class KagiClient:
         rate_limit_attempts = 0
         for attempt in range(1, max_attempts + 1):
             r = requests.post(url, headers=self._headers(), json=payload, timeout=timeout)
+            if url.rstrip("/") == self.fastgpt_url.rstrip("/"):
+                record_kagi_fastgpt_http(1)
+            elif url.rstrip("/") == self.summarize_url.rstrip("/"):
+                record_kagi_summarize_http(1)
             if r.status_code == 429:
                 rate_limit_attempts += 1
                 if rate_limit_attempts >= max_attempts:

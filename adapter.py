@@ -6,6 +6,8 @@ import feedparser
 import requests
 from bs4 import BeautifulSoup
 
+from api_usage import record_rss_feed_fetch, record_rss_page_fetch
+
 from pydantic import BaseModel, field_validator, HttpUrl, AwareDatetime
 
 class ArticleInfo(BaseModel):
@@ -30,6 +32,7 @@ class BaseRSSAdapter:
     def __init__(self, rss_url):
         self.rss_url = rss_url
         self.feed = feedparser.parse(rss_url)
+        record_rss_feed_fetch(1)
 
     @property
     def articles(self) -> Iterator[ArticleInfo]:
@@ -119,6 +122,7 @@ class NatureAdapter(BaseRSSAdapter):
     def crawl_abstract(self, article: ArticleInfo):
         # 发送HTTP请求获取页面内容
         response = requests.get(article.link)
+        record_rss_page_fetch(1)
         response.raise_for_status()  # 检查请求是否成功
 
         # 使用BeautifulSoup解析页面内容

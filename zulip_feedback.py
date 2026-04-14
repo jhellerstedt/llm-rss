@@ -5,6 +5,7 @@ import logging
 import re
 from typing import Any
 
+from api_usage import record_zulip_api
 from rss_merge import normalize_link
 from zulip_context import fetch_messages_narrow, strip_zulip_html, _client_for_realm
 
@@ -248,6 +249,7 @@ def post_feedback_ranking_for_new_items(
                         result,
                     )
                     continue
+                record_zulip_api(1)
                 posted.add(key)
                 sends_left -= 1
             except Exception:
