@@ -1,8 +1,12 @@
 import unittest
 from unittest.mock import Mock, patch
 
+from kagi_quota import reset_kagi_session_quota
+
 
 class TestFastGPTHandling(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_kagi_session_quota()
     def test_parse_reply_allows_latex_backslashes(self) -> None:
         # This is a realistic failure mode: the model includes LaTeX like "\infty"
         # inside a JSON string, which is invalid JSON unless the backslash is escaped.

@@ -12,6 +12,9 @@ use_cache = true
 max_concurrent_api_requests = 2
 # Retries per request (429 / transient 5xx)
 max_http_attempts = 12
+# Local keyword shortlist before Kagi; articles are scored in batches (fewer FastGPT calls).
+prefilter_max_candidates = 20
+scoring_batch_size = 5
 
 # OpenAlex metadata for feed items (h-index, first/last author affiliations).
 # Set mailto so OpenAlex can contact you if needed (also configurable via OPENALEX_MAILTO).
@@ -49,7 +52,14 @@ impact_threshold = 3
 # concurrent_requests = 2
 # crawl_abstract = false
 
-# Optional: pull discussion context from Zulip (requires zulip_realms.json or env realms)
+# Optional: pull discussion context from Zulip (requires zulip_realms.json or env realms).
+# Each row's optional "topic" / lookback only affect discussion context, not feedback.
+# When zulip_sources is set, the bot also posts at most two Zulip messages per group run
+# total (the two highest-ranked passing papers by relevance then impact; skips links already
+# present in each stream's "feedback ranking" topic). If you list multiple realm/stream rows,
+# the budget is shared across them (earlier rows in config order are tried first). Those
+# messages live on each row's realm+stream under topic "feedback ranking"; :thumbs_up: /
+# :thumbs_down: reactions there inform later scoring runs.
 # zulip_sources = [
 #   { realm = "myrealm", stream = "papers", lookback_hours = 168, max_messages = 400 },
 #   { realm = "myrealm", stream = "lab", topic = "reading", lookback_hours = 72, max_messages = 200 },

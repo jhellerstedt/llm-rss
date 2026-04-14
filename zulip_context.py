@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from api_usage import record_zulip_api
+
 logger = logging.getLogger(__name__)
 
 _HTML_TAG = re.compile(r"<[^>]+>")
@@ -125,6 +127,7 @@ def fetch_messages_narrow(
         if result.get("result") != "success":
             logger.warning("Zulip get_messages failed: %s", result.get("msg", result))
             break
+        record_zulip_api(1)
         messages = result.get("messages") or []
         if not messages:
             break
