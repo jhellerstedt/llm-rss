@@ -385,8 +385,9 @@ def process_group(
     merged = merge_feed_history(persisted, new_items, rss_max_items)
     n_kept = len(merged)
 
+    feed_title = group_name.replace("_", " ").strip().title()
     new_feed = Rss201rev2Feed(
-        title=f"Filtered RSS — {group_name}",
+        title=feed_title,
         link="myserver",
         description=f"LLM-filtered feed ({group_name})",
         language="en",
