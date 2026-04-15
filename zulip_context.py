@@ -14,6 +14,9 @@ from api_usage import record_zulip_api
 
 logger = logging.getLogger(__name__)
 
+# Private metadata attached to each fetched message dict for journal suggestions.
+ZULIP_SECTION_META_KEY = "_llm_rss_zulip_section"
+
 _HTML_TAG = re.compile(r"<[^>]+>")
 _HREF_URL = re.compile(r"""(?is)\bhref\s*=\s*["'](https?://[^"'<>\\s]+)["']""")
 _PLAIN_URL = re.compile(r"""(?i)\bhttps?://[^\s<>"']+""")
@@ -131,8 +134,11 @@ def build_zulip_context_and_messages(
         except Exception:
             logger.exception("Zulip fetch failed realm=%s stream=%s", realm, stream)
             continue
-        all_msgs.extend(msgs)
         label = f"{realm}/{stream}" + (f"/{topic}" if topic else "")
+        for m in msgs:
+            tagged = dict(m)
+            tagged[ZULIP_SECTION_META_KEY] = label
+            all_msgs.append(tagged)
         body = format_messages(msgs)
         if body:
             parts.append(f"### {label}\n{body}")

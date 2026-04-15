@@ -31,14 +31,16 @@ from zulip_feedback import (
     post_feedback_ranking_for_new_items,
     select_top_ranked_for_feedback_posts,
 )
+from journal_venue import VenueBucket, tracked_venues_from_group_urls
 from zulip_journal_suggestions import (
     DEFAULT_DOMAIN_DENYLIST,
-    domain_counts_from_zulip_messages,
+    apex_domains_from_nested,
     filter_academic_journal_domains_with_kagi,
-    format_missing_journals_message,
-    missing_domain_counts,
+    filter_nested_by_allowed_domains,
+    format_missing_journals_message_nested,
+    merge_journal_suggestion_maps,
+    missing_venues_by_section_from_messages,
     post_missing_journals_suggestions,
-    tracked_domains_from_group_urls,
 )
 
 load_dotenv()
@@ -468,7 +470,8 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         batch_sz = int(kagi_cfg.get("scoring_batch_size", 5))
 
         # Aggregate journal suggestions across the full run to avoid repeated posts per group.
-        suggestions_by_pair: dict[tuple[str, str], dict[str, int]] = {}
+        # (realm, stream) -> section label -> venue_key -> VenueBucket
+        suggestions_by_pair: dict[tuple[str, str], dict[str, dict[str, VenueBucket]]] = {}
         for group in groups:
             print(f"--- Group: {group['name']} ---")
             process_group(
@@ -501,25 +504,26 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 logger.exception("Failed to refetch Zulip messages for journal suggestions")
                 continue
 
-            tracked = tracked_domains_from_group_urls([str(u) for u in (group.get("urls") or [])])
-            zulip_counts = domain_counts_from_zulip_messages(msgs, denylist=DEFAULT_DOMAIN_DENYLIST)
-            missing = missing_domain_counts(
-                tracked_domains=tracked,
-                zulip_domain_counts=zulip_counts,
+            tracked_vk = tracked_venues_from_group_urls([str(u) for u in (group.get("urls") or [])])
+            missing_nested = missing_venues_by_section_from_messages(
+                msgs,
+                tracked_venue_keys=tracked_vk,
+                denylist=DEFAULT_DOMAIN_DENYLIST,
             )
-            if not missing:
+            if not missing_nested:
                 continue
             # Merge missing counts into each unique realm/stream destination for this group.
             from zulip_feedback import unique_realm_stream_pairs
 
             for pair in unique_realm_stream_pairs(zulip_sources):
-                bucket = suggestions_by_pair.setdefault(pair, {})
-                for d, c in missing.items():
-                    bucket[d] = bucket.get(d, 0) + int(c)
+                dest = suggestions_by_pair.setdefault(pair, {})
+                merge_journal_suggestion_maps(dest, missing_nested)
 
         # Single Kagi API call to filter domains, then post once per destination stream for the run.
         if suggestions_by_pair and kagi:
-            all_domains: list[str] = sorted({d for m in suggestions_by_pair.values() for d in m})
+            all_domains: list[str] = sorted(
+                {d for nested in suggestions_by_pair.values() for d in apex_domains_from_nested(nested)}
+            )
             try:
                 allowed, _reasons = filter_academic_journal_domains_with_kagi(kagi, all_domains)
                 allowed_set = set(allowed)
@@ -528,11 +532,11 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 allowed_set = set()
 
             if allowed_set:
-                for (realm, stream), dom_counts in suggestions_by_pair.items():
-                    filtered_counts = {d: c for d, c in dom_counts.items() if d in allowed_set}
-                    if not filtered_counts:
+                for (realm, stream), nested in suggestions_by_pair.items():
+                    filtered_nested = filter_nested_by_allowed_domains(nested, allowed_set)
+                    if not filtered_nested:
                         continue
-                    body = format_missing_journals_message(filtered_counts)
+                    body = format_missing_journals_message_nested(filtered_nested)
                     post_missing_journals_suggestions(
                         zulip_sources=[{"realm": realm, "stream": stream}],
                         zulip_realms=zulip_realms,
