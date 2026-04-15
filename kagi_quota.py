@@ -12,7 +12,7 @@ _kagi_invocations_used: int = 0
 _openalex_fallback_fastgpt_used: int = 0
 
 MAX_KAGI_INVOCATIONS_PER_RUN: int = 70
-MAX_OPENALEX_FALLBACK_FASTGPT_PER_RUN: int = 5
+MAX_OPENALEX_FALLBACK_FASTGPT_PER_RUN: int = 20
 # Worst-case slots to leave for post-scoring Kagi (OpenAlex metadata + margin).
 DEFAULT_RESERVE_AFTER_SCORING: int = 7
 
