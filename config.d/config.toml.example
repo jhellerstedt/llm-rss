@@ -4,7 +4,7 @@
 fastgpt_url = "https://kagi.com/api/v0/fastgpt"
 summarize_url = "https://kagi.com/api/v0/summarize"
 web_search = true
-summarize_engine = "muriel"
+summarize_engine = "cecil" # "muriel" is extremely expensive
 fastgpt_timeout = 120
 summarize_timeout = 180
 use_cache = true
