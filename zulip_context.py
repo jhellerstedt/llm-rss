@@ -8,12 +8,16 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from api_usage import record_zulip_api
 
 logger = logging.getLogger(__name__)
 
 _HTML_TAG = re.compile(r"<[^>]+>")
+_HREF_URL = re.compile(r"""(?is)\bhref\s*=\s*["'](https?://[^"'<>\\s]+)["']""")
+_PLAIN_URL = re.compile(r"""(?i)\bhttps?://[^\s<>"']+""")
+_URL_TRAILING_PUNCT = ".,;:!?)]}"
 
 
 def strip_zulip_html(content: str) -> str:
@@ -26,6 +30,130 @@ def strip_zulip_html(content: str) -> str:
         .replace("&quot;", '"')
         .replace("&#39;", "'")
     )
+
+
+def _clean_extracted_url(url: str) -> str:
+    u = (url or "").strip().strip("<>")
+    # Common in chat: wrap URLs in parentheses / end with punctuation.
+    while u and u[-1] in _URL_TRAILING_PUNCT:
+        u = u[:-1]
+    return u
+
+
+def extract_urls_from_zulip_message_content(raw_html: str) -> list[str]:
+    """Extract URLs from Zulip message `content` (HTML-ish string).
+
+    Prefer href links, but also detect plain URLs that appear in text.
+    Returns stable-unique list, preserving first-seen order.
+    """
+    if not raw_html:
+        return []
+
+    candidates: list[str] = []
+    candidates.extend(_HREF_URL.findall(raw_html))
+    candidates.extend(_PLAIN_URL.findall(raw_html))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in candidates:
+        cleaned = _clean_extracted_url(c)
+        if not cleaned:
+            continue
+        # Basic parse sanity; keep only http(s) URLs with a netloc.
+        try:
+            p = urlparse(cleaned)
+        except Exception:
+            continue
+        if p.scheme.lower() not in {"http", "https"}:
+            continue
+        if not p.netloc:
+            continue
+        if cleaned not in seen:
+            seen.add(cleaned)
+            out.append(cleaned)
+    return out
+
+
+def domain_from_url(url: str) -> str | None:
+    """Return normalized domain for URL (journal == domain)."""
+    if not url:
+        return None
+    try:
+        p = urlparse(url.strip())
+    except Exception:
+        return None
+    host = (p.netloc or "").strip().lower()
+    if not host:
+        return None
+    # Drop auth, port, and leading www.
+    if "@" in host:
+        host = host.split("@", 1)[1]
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return host or None
+
+
+def build_zulip_context_and_messages(
+    zulip_sources: list[dict[str, Any]],
+    realms: dict[str, dict[str, str]],
+    context_max_chars: int,
+    kagi_summarize: Any | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Like build_zulip_context_block, but also returns the raw message dicts fetched."""
+    if not zulip_sources:
+        return "", []
+
+    try:
+        import zulip  # noqa: F401
+    except ImportError as e:
+        raise ImportError("Install the 'zulip' package when using zulip_sources") from e
+
+    parts: list[str] = []
+    all_msgs: list[dict[str, Any]] = []
+    for src in zulip_sources:
+        realm = src.get("realm")
+        stream = src.get("stream")
+        if not realm or not stream:
+            logger.warning("Skipping zulip source missing realm or stream: %s", src)
+            continue
+        topic = src.get("topic")
+        lookback = int(src.get("lookback_hours", 168))
+        max_msg = int(src.get("max_messages", 500))
+        try:
+            client = _client_for_realm(realms, str(realm).lower())
+        except KeyError as e:
+            logger.error("%s", e)
+            continue
+        try:
+            msgs = fetch_messages_narrow(client, stream, topic, lookback, max_msg)
+        except Exception:
+            logger.exception("Zulip fetch failed realm=%s stream=%s", realm, stream)
+            continue
+        all_msgs.extend(msgs)
+        label = f"{realm}/{stream}" + (f"/{topic}" if topic else "")
+        body = format_messages(msgs)
+        if body:
+            parts.append(f"### {label}\n{body}")
+
+    raw = "\n\n".join(parts).strip()
+    if not raw:
+        return "", all_msgs
+
+    if len(raw) <= context_max_chars or kagi_summarize is None:
+        block = raw[:context_max_chars] if len(raw) > context_max_chars else raw
+        return block, all_msgs
+
+    try:
+        digest = kagi_summarize.summarize(raw[:200_000])
+        return (
+            f"(Summarized from Zulip; original length {len(raw)} chars.)\n\n{digest}",
+            all_msgs,
+        )
+    except Exception:
+        logger.exception("Kagi summarize failed; truncating Zulip context")
+        return raw[:context_max_chars], all_msgs
 
 
 def load_zulip_realms(
@@ -175,49 +303,10 @@ def build_zulip_context_block(
     kagi_summarize: Any | None = None,
 ) -> str:
     """Concatenate formatted messages from all sources; summarize if over context_max_chars."""
-    if not zulip_sources:
-        return ""
-
-    try:
-        import zulip  # noqa: F401
-    except ImportError as e:
-        raise ImportError("Install the 'zulip' package when using zulip_sources") from e
-
-    parts: list[str] = []
-    for src in zulip_sources:
-        realm = src.get("realm")
-        stream = src.get("stream")
-        if not realm or not stream:
-            logger.warning("Skipping zulip source missing realm or stream: %s", src)
-            continue
-        topic = src.get("topic")
-        lookback = int(src.get("lookback_hours", 168))
-        max_msg = int(src.get("max_messages", 500))
-        try:
-            client = _client_for_realm(realms, str(realm).lower())
-        except KeyError as e:
-            logger.error("%s", e)
-            continue
-        try:
-            msgs = fetch_messages_narrow(client, stream, topic, lookback, max_msg)
-        except Exception:
-            logger.exception("Zulip fetch failed realm=%s stream=%s", realm, stream)
-            continue
-        label = f"{realm}/{stream}" + (f"/{topic}" if topic else "")
-        body = format_messages(msgs)
-        if body:
-            parts.append(f"### {label}\n{body}")
-
-    raw = "\n\n".join(parts).strip()
-    if not raw:
-        return ""
-
-    if len(raw) <= context_max_chars or kagi_summarize is None:
-        return raw[:context_max_chars] if len(raw) > context_max_chars else raw
-
-    try:
-        digest = kagi_summarize.summarize(raw[:200_000])
-        return f"(Summarized from Zulip; original length {len(raw)} chars.)\n\n{digest}"
-    except Exception:
-        logger.exception("Kagi summarize failed; truncating Zulip context")
-        return raw[:context_max_chars]
+    block, _msgs = build_zulip_context_and_messages(
+        zulip_sources,
+        realms,
+        context_max_chars,
+        kagi_summarize=kagi_summarize,
+    )
+    return block

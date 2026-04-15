@@ -24,17 +24,38 @@ from api_usage import log_api_usage_summary, reset_api_usage_stats
 from kagi_batch_scoring import score_article_batch_with_kagi
 from kagi_quota import log_kagi_quota_status, plan_scoring_budget, reset_kagi_session_quota
 from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history, normalize_link
-from zulip_context import build_zulip_context_block, load_zulip_realms
+from zulip_context import build_zulip_context_and_messages, load_zulip_realms
 from zulip_feedback import (
     format_feedback_prompt_snippet,
     load_feedback_state_for_group,
     post_feedback_ranking_for_new_items,
     select_top_ranked_for_feedback_posts,
 )
+from zulip_journal_suggestions import (
+    DEFAULT_DOMAIN_DENYLIST,
+    domain_counts_from_zulip_messages,
+    filter_academic_journal_domains_with_kagi,
+    format_missing_journals_message,
+    missing_domain_counts,
+    post_missing_journals_suggestions,
+    tracked_domains_from_group_urls,
+)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Directory containing this file (repo root). Relative rss_path values in config
+# resolve here so feeds are written under the repo regardless of process CWD.
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def resolve_rss_path(rss_path: str | os.PathLike[str]) -> str:
+    p = Path(rss_path)
+    if p.is_absolute():
+        return str(p)
+    return str((REPO_ROOT / p).resolve())
+
 
 def to_bullets(text_list: list[str]) -> str:
     return "\n".join(f"- {item}" for item in text_list)
@@ -101,7 +122,7 @@ def _legacy_group(cfg: dict) -> dict:
         "urls": cfg["urls"],
         "research_areas": cfg["research_areas"],
         "excluded_areas": cfg["excluded_areas"],
-        "rss_path": cfg.get("rss_path", "data/rss.xml"),
+        "rss_path": resolve_rss_path(cfg.get("rss_path", "data/rss.xml")),
         "rss_max_items": int(cfg.get("rss_max_items", 25)),
         "period": cfg.get("period", 24),
         "relevance_threshold": cfg.get("relevance_threshold", 5),
@@ -121,7 +142,9 @@ def expand_groups(cfg: dict) -> list[dict]:
                 "urls": g["urls"],
                 "research_areas": g["research_areas"],
                 "excluded_areas": g["excluded_areas"],
-                "rss_path": g.get("rss_path", cfg.get("rss_path", "data/rss.xml")),
+                "rss_path": resolve_rss_path(
+                    g.get("rss_path", cfg.get("rss_path", "data/rss.xml"))
+                ),
                 "rss_max_items": int(
                     g.get("rss_max_items", cfg.get("rss_max_items", 25))
                 ),
@@ -185,6 +208,7 @@ def process_group(
     zulip_sources = group.get("zulip_sources") or []
 
     zulip_block = ""
+    zulip_msgs: list[dict[str, Any]] = []
     if zulip_sources:
         if not zulip_realms:
             logger.warning(
@@ -192,12 +216,14 @@ def process_group(
                 group_name,
             )
         else:
-            zulip_block = build_zulip_context_block(
+            zulip_block, zulip_msgs = build_zulip_context_and_messages(
                 zulip_sources,
                 zulip_realms,
                 context_max_chars,
                 kagi_summarize=kagi,
             )
+
+            # Journal suggestions are posted once per run (see main()).
 
     feedback_signals: dict[str, tuple[int, int]] = {}
     feedback_msgs_by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -373,8 +399,9 @@ def process_group(
     merged = merge_feed_history(persisted, new_items, rss_max_items)
     n_kept = len(merged)
 
+    feed_title = group_name.replace("_", " ").strip().title()
     new_feed = Rss201rev2Feed(
-        title=f"Filtered RSS — {group_name}",
+        title=feed_title,
         link="myserver",
         description=f"LLM-filtered feed ({group_name})",
         language="en",
@@ -439,6 +466,9 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         kagi_cfg = cfg.get("kagi") or {}
         pf_cap = int(kagi_cfg.get("prefilter_max_candidates", 20))
         batch_sz = int(kagi_cfg.get("scoring_batch_size", 5))
+
+        # Aggregate journal suggestions across the full run to avoid repeated posts per group.
+        suggestions_by_pair: dict[tuple[str, str], dict[str, int]] = {}
         for group in groups:
             print(f"--- Group: {group['name']} ---")
             process_group(
@@ -451,6 +481,64 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 kagi_prefilter_cap=pf_cap,
                 kagi_batch_size=batch_sz,
             )
+
+            # Collect per-group missing domains to a run-level accumulator.
+            zulip_sources = group.get("zulip_sources") or []
+            if not zulip_sources or not zulip_realms:
+                continue
+            # NOTE: We recompute from group-level zulip context already fetched inside process_group
+            # would be more efficient if process_group returned it; keeping simple for now.
+            # Fetch messages again but with same limits; still one message post per run after this loop.
+            try:
+                context_max_chars = int((zulip_cfg or {}).get("context_max_chars", 12_000))
+                _block, msgs = build_zulip_context_and_messages(
+                    zulip_sources,
+                    zulip_realms,
+                    context_max_chars,
+                    kagi_summarize=None,
+                )
+            except Exception:
+                logger.exception("Failed to refetch Zulip messages for journal suggestions")
+                continue
+
+            tracked = tracked_domains_from_group_urls([str(u) for u in (group.get("urls") or [])])
+            zulip_counts = domain_counts_from_zulip_messages(msgs, denylist=DEFAULT_DOMAIN_DENYLIST)
+            missing = missing_domain_counts(
+                tracked_domains=tracked,
+                zulip_domain_counts=zulip_counts,
+            )
+            if not missing:
+                continue
+            # Merge missing counts into each unique realm/stream destination for this group.
+            from zulip_feedback import unique_realm_stream_pairs
+
+            for pair in unique_realm_stream_pairs(zulip_sources):
+                bucket = suggestions_by_pair.setdefault(pair, {})
+                for d, c in missing.items():
+                    bucket[d] = bucket.get(d, 0) + int(c)
+
+        # Single Kagi API call to filter domains, then post once per destination stream for the run.
+        if suggestions_by_pair and kagi:
+            all_domains: list[str] = sorted({d for m in suggestions_by_pair.values() for d in m})
+            try:
+                allowed, _reasons = filter_academic_journal_domains_with_kagi(kagi, all_domains)
+                allowed_set = set(allowed)
+            except Exception:
+                logger.exception("Kagi journal-domain filter failed; skipping journal suggestions post")
+                allowed_set = set()
+
+            if allowed_set:
+                for (realm, stream), dom_counts in suggestions_by_pair.items():
+                    filtered_counts = {d: c for d, c in dom_counts.items() if d in allowed_set}
+                    if not filtered_counts:
+                        continue
+                    body = format_missing_journals_message(filtered_counts)
+                    post_missing_journals_suggestions(
+                        zulip_sources=[{"realm": realm, "stream": stream}],
+                        zulip_realms=zulip_realms,
+                        message=body,
+                        dryrun=dryrun,
+                    )
     finally:
         log_api_usage_summary(logger)
         log_kagi_quota_status(logger)
