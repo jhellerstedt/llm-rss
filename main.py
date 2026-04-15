@@ -45,6 +45,18 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Directory containing this file (repo root). Relative rss_path values in config
+# resolve here so feeds are written under the repo regardless of process CWD.
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def resolve_rss_path(rss_path: str | os.PathLike[str]) -> str:
+    p = Path(rss_path)
+    if p.is_absolute():
+        return str(p)
+    return str((REPO_ROOT / p).resolve())
+
+
 def to_bullets(text_list: list[str]) -> str:
     return "\n".join(f"- {item}" for item in text_list)
 
@@ -110,7 +122,7 @@ def _legacy_group(cfg: dict) -> dict:
         "urls": cfg["urls"],
         "research_areas": cfg["research_areas"],
         "excluded_areas": cfg["excluded_areas"],
-        "rss_path": cfg.get("rss_path", "data/rss.xml"),
+        "rss_path": resolve_rss_path(cfg.get("rss_path", "data/rss.xml")),
         "rss_max_items": int(cfg.get("rss_max_items", 25)),
         "period": cfg.get("period", 24),
         "relevance_threshold": cfg.get("relevance_threshold", 5),
@@ -130,7 +142,9 @@ def expand_groups(cfg: dict) -> list[dict]:
                 "urls": g["urls"],
                 "research_areas": g["research_areas"],
                 "excluded_areas": g["excluded_areas"],
-                "rss_path": g.get("rss_path", cfg.get("rss_path", "data/rss.xml")),
+                "rss_path": resolve_rss_path(
+                    g.get("rss_path", cfg.get("rss_path", "data/rss.xml"))
+                ),
                 "rss_max_items": int(
                     g.get("rss_max_items", cfg.get("rss_max_items", 25))
                 ),
