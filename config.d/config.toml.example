@@ -29,6 +29,8 @@ kagi_fallback = true
 [zulip]
 # realms_config_file = "zulip_realms.json"
 context_max_chars = 12000
+# When groups use zulip_sources, post a weekly digest of config.toml edits to topic "journal suggestions".
+# journal_weekly_summary = false
 
 # Topical group 1: condensed matter / general physics journals
 [[groups]]

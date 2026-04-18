@@ -1,11 +1,10 @@
 """Suggest missing journal domains based on Zulip-linked articles."""
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from typing import Any
 
-from api_usage import record_zulip_api
 from fastgpt_reply import try_load_json_object_from_llm
 from journal_venue import (
     VenueBucket,
@@ -16,15 +15,11 @@ from journal_venue import (
 )
 from zulip_context import (
     ZULIP_SECTION_META_KEY,
-    _client_for_realm,
     domain_from_url,
     extract_urls_from_zulip_message_content,
 )
-from zulip_feedback import unique_realm_stream_pairs
 
 logger = logging.getLogger(__name__)
-
-JOURNAL_SUGGESTIONS_TOPIC = "journal suggestions"
 
 UNKNOWN_ZULIP_SECTION = "(unknown section)"
 
@@ -278,56 +273,90 @@ def format_missing_journals_message_nested(
     return "\n".join(lines).strip()
 
 
-def post_missing_journals_suggestions(
-    *,
-    zulip_sources: list[dict[str, Any]],
-    zulip_realms: dict[str, dict[str, str]],
-    message: str,
-    dryrun: bool,
-    topic: str = JOURNAL_SUGGESTIONS_TOPIC,
-) -> None:
-    if not zulip_sources or not zulip_realms:
-        return
-    if not message.strip():
-        return
-
-    for realm, stream in unique_realm_stream_pairs(zulip_sources):
-        try:
-            client = _client_for_realm(zulip_realms, realm)
-        except Exception:
-            logger.exception("Zulip client init failed realm=%s stream=%s", realm, stream)
-            continue
-
-        if dryrun:
-            logger.info(
-                "[dry run] would post journal suggestions realm=%s stream=%s",
-                realm,
-                stream,
-            )
-            continue
-
-        try:
-            result = client.send_message(
-                {
-                    "type": "stream",
-                    "to": stream,
-                    "topic": topic,
-                    "content": message,
-                }
-            )
-            if result.get("result") != "success":
-                logger.warning(
-                    "Zulip send_message failed (journal suggestions) realm=%s stream=%s: %s",
-                    realm,
-                    stream,
-                    result,
-                )
+def new_feed_urls_from_filtered_nested(
+    filtered_nested: dict[str, dict[str, VenueBucket]],
+    existing_urls: list[str] | set[str],
+) -> list[str]:
+    """Return suggested_rss URLs from nested venues, newest-by-link-count first, skipping existing."""
+    existing = {str(u).strip() for u in existing_urls}
+    ranked: list[tuple[int, str]] = []
+    for vmap in filtered_nested.values():
+        for b in vmap.values():
+            rss = (b.suggested_rss or "").strip()
+            if not rss:
                 continue
-            record_zulip_api(1)
-        except Exception:
-            logger.exception(
-                "Zulip post journal suggestions failed realm=%s stream=%s",
-                realm,
-                stream,
-            )
+            ranked.append((-b.count, rss))
+    ranked.sort(key=lambda t: (t[0], t[1]))
+    out: list[str] = []
+    seen: set[str] = set()
+    for _neg_count, rss in ranked:
+        if rss in existing or rss in seen:
+            continue
+        seen.add(rss)
+        out.append(rss)
+    return out
+
+
+def _parse_group_area_curation_response(text: str) -> tuple[list[str], list[str]] | None:
+    obj = try_load_json_object_from_llm(text or "")
+    if not isinstance(obj, dict):
+        return None
+    ra = obj.get("research_areas")
+    ex = obj.get("excluded_areas")
+    if not isinstance(ra, list):
+        return None
+    if ex is None:
+        ex = []
+    if not isinstance(ex, list):
+        return None
+    research = [str(x).strip() for x in ra if str(x).strip()]
+    excluded = [str(x).strip() for x in ex if str(x).strip()]
+    if not research:
+        return None
+    return research, excluded
+
+
+def curate_group_research_lists_with_kagi(
+    kagi,
+    *,
+    group_name: str,
+    research_areas: list[str],
+    excluded_areas: list[str],
+    journals_markdown: str,
+    zulip_excerpt: str,
+) -> tuple[list[str], list[str]] | None:
+    """Ask FastGPT to revise research_areas and excluded_areas from Zulip + journal signals."""
+    ra = json.dumps(research_areas)
+    ex = json.dumps(excluded_areas)
+    zex = (zulip_excerpt or "").strip()
+    if len(zex) > 18_000:
+        zex = zex[:18_000] + "\n\n[truncated]"
+    prompt = (
+        "You maintain `research_areas` and `excluded_areas` strings for an academic RSS feed group.\n"
+        "The team discusses papers on Zulip; below is an excerpt of that discussion, plus a summary of "
+        "journal links they shared that are not yet on the group's feed list.\n\n"
+        f"Group name: {group_name}\n\n"
+        f"Current research_areas (JSON array): {ra}\n"
+        f"Current excluded_areas (JSON array): {ex}\n\n"
+        "### Journals mentioned (from chat; may include suggested RSS lines)\n"
+        f"{journals_markdown.strip()}\n\n"
+        "### Zulip discussion excerpt\n"
+        f"{zex if zex else '(none)'}\n\n"
+        "Return ONLY a single JSON object with exactly these keys:\n"
+        '- "research_areas": array of strings (specific topics this group should emphasize when scoring; '
+        "at least one item)\n"
+        '- "excluded_areas": array of strings (topics to generally deprioritize; may be empty)\n'
+    )
+    text = kagi.fastgpt_query(prompt)
+    if not (text or "").strip():
+        logger.warning("Kagi group-area curation returned empty output (group=%s)", group_name)
+        return None
+    parsed = _parse_group_area_curation_response(text)
+    if parsed is None:
+        logger.warning(
+            "Kagi group-area curation parse failed (group=%s); snippet=%s",
+            group_name,
+            (text or "")[:400],
+        )
+    return parsed
 

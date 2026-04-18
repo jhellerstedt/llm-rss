@@ -1,11 +1,12 @@
 import unittest
 
-from journal_venue import tracked_venues_from_group_urls, venue_from_article_url
+from journal_venue import VenueBucket, tracked_venues_from_group_urls, venue_from_article_url
 from zulip_context import domain_from_url, extract_urls_from_zulip_message_content
 from zulip_journal_suggestions import (
     DEFAULT_DOMAIN_DENYLIST,
     ZULIP_SECTION_META_KEY,
     apex_domains_from_nested,
+    curate_group_research_lists_with_kagi,
     domain_counts_from_zulip_messages,
     filter_academic_journal_domains_with_kagi,
     filter_nested_by_allowed_domains,
@@ -14,6 +15,7 @@ from zulip_journal_suggestions import (
     merge_journal_suggestion_maps,
     missing_domain_counts,
     missing_venues_by_section_from_messages,
+    new_feed_urls_from_filtered_nested,
     tracked_domains_from_group_urls,
 )
 
@@ -179,6 +181,65 @@ class TestZulipJournalSuggestionsLogic(unittest.TestCase):
         kept, reasons = filter_academic_journal_domains_with_kagi(FakeKagi(), ["science.org"])
         self.assertEqual(kept, [])
         self.assertEqual(reasons, {})
+
+    def test_new_feed_urls_orders_by_count_skips_existing(self) -> None:
+        nested = {
+            "sec": {
+                "vk1": VenueBucket(
+                    1,
+                    "Low",
+                    "https://www.nature.com/low.rss",
+                    None,
+                    "nature.com",
+                    None,
+                ),
+                "vk2": VenueBucket(
+                    9,
+                    "High",
+                    "https://www.nature.com/high.rss",
+                    None,
+                    "nature.com",
+                    None,
+                ),
+                "vk3": VenueBucket(
+                    5,
+                    "Mid",
+                    None,
+                    "https://example.com/j",
+                    "example.com",
+                    None,
+                ),
+            }
+        }
+        out = new_feed_urls_from_filtered_nested(
+            nested,
+            ["https://www.nature.com/high.rss"],
+        )
+        self.assertEqual(out, ["https://www.nature.com/low.rss"])
+
+        out2 = new_feed_urls_from_filtered_nested(nested, [])
+        self.assertEqual(
+            out2,
+            ["https://www.nature.com/high.rss", "https://www.nature.com/low.rss"],
+        )
+
+    def test_curate_group_research_lists_parses_optional_excluded(self) -> None:
+        class FakeKagi:
+            def fastgpt_query(self, _prompt: str) -> str:
+                return '{"research_areas":["quantum materials"],"excluded_areas":[]}'
+
+        got = curate_group_research_lists_with_kagi(
+            FakeKagi(),
+            group_name="g1",
+            research_areas=["old"],
+            excluded_areas=["x"],
+            journals_markdown="### md",
+            zulip_excerpt="chat",
+        )
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertEqual(got[0], ["quantum materials"])
+        self.assertEqual(got[1], [])
 
 
 if __name__ == "__main__":

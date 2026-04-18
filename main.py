@@ -35,13 +35,15 @@ from journal_venue import VenueBucket, tracked_venues_from_group_urls
 from zulip_journal_suggestions import (
     DEFAULT_DOMAIN_DENYLIST,
     apex_domains_from_nested,
+    curate_group_research_lists_with_kagi,
     filter_academic_journal_domains_with_kagi,
     filter_nested_by_allowed_domains,
     format_missing_journals_message_nested,
     merge_journal_suggestion_maps,
     missing_venues_by_section_from_messages,
-    post_missing_journals_suggestions,
+    new_feed_urls_from_filtered_nested,
 )
+from zulip_journal_weekly_summary import maybe_post_weekly_journal_config_summary
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -225,7 +227,7 @@ def process_group(
                 kagi_summarize=kagi,
             )
 
-            # Journal suggestions are posted once per run (see main()).
+            # Journal suggestions are merged into config.toml once per run (see main()).
 
     feedback_signals: dict[str, tuple[int, int]] = {}
     feedback_msgs_by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -469,10 +471,10 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         pf_cap = int(kagi_cfg.get("prefilter_max_candidates", 20))
         batch_sz = int(kagi_cfg.get("scoring_batch_size", 5))
 
-        # Aggregate journal suggestions across the full run to avoid repeated posts per group.
-        # (realm, stream) -> section label -> venue_key -> VenueBucket
-        suggestions_by_pair: dict[tuple[str, str], dict[str, dict[str, VenueBucket]]] = {}
-        for group in groups:
+        # Per-group index -> untracked venues from that group's Zulip pulls (for config.toml updates).
+        suggestions_by_group_idx: dict[int, dict[str, dict[str, VenueBucket]]] = {}
+        zulip_plain_block_by_group_idx: dict[int, str] = {}
+        for gi, group in enumerate(groups):
             print(f"--- Group: {group['name']} ---")
             process_group(
                 group,
@@ -485,21 +487,18 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 kagi_batch_size=batch_sz,
             )
 
-            # Collect per-group missing domains to a run-level accumulator.
             zulip_sources = group.get("zulip_sources") or []
             if not zulip_sources or not zulip_realms:
                 continue
-            # NOTE: We recompute from group-level zulip context already fetched inside process_group
-            # would be more efficient if process_group returned it; keeping simple for now.
-            # Fetch messages again but with same limits; still one message post per run after this loop.
             try:
                 context_max_chars = int((zulip_cfg or {}).get("context_max_chars", 12_000))
-                _block, msgs = build_zulip_context_and_messages(
+                block, msgs = build_zulip_context_and_messages(
                     zulip_sources,
                     zulip_realms,
                     context_max_chars,
                     kagi_summarize=None,
                 )
+                zulip_plain_block_by_group_idx[gi] = block
             except Exception:
                 logger.exception("Failed to refetch Zulip messages for journal suggestions")
                 continue
@@ -512,37 +511,118 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
             )
             if not missing_nested:
                 continue
-            # Merge missing counts into each unique realm/stream destination for this group.
-            from zulip_feedback import unique_realm_stream_pairs
+            dest = suggestions_by_group_idx.setdefault(gi, {})
+            merge_journal_suggestion_maps(dest, missing_nested)
 
-            for pair in unique_realm_stream_pairs(zulip_sources):
-                dest = suggestions_by_pair.setdefault(pair, {})
-                merge_journal_suggestion_maps(dest, missing_nested)
-
-        # Single Kagi API call to filter domains, then post once per destination stream for the run.
-        if suggestions_by_pair and kagi:
+        # One Kagi journal-domain filter for the run, then merge feeds + curated lists into config.toml.
+        if suggestions_by_group_idx and kagi:
             all_domains: list[str] = sorted(
-                {d for nested in suggestions_by_pair.values() for d in apex_domains_from_nested(nested)}
+                {
+                    d
+                    for nested in suggestions_by_group_idx.values()
+                    for d in apex_domains_from_nested(nested)
+                }
             )
             try:
                 allowed, _reasons = filter_academic_journal_domains_with_kagi(kagi, all_domains)
                 allowed_set = set(allowed)
             except Exception:
-                logger.exception("Kagi journal-domain filter failed; skipping journal suggestions post")
+                logger.exception(
+                    "Kagi journal-domain filter failed; skipping journal suggestion config updates"
+                )
                 allowed_set = set()
 
             if allowed_set:
-                for (realm, stream), nested in suggestions_by_pair.items():
+                config_changed = False
+                for gi, group in enumerate(groups):
+                    nested = suggestions_by_group_idx.get(gi)
+                    if not nested:
+                        continue
                     filtered_nested = filter_nested_by_allowed_domains(nested, allowed_set)
                     if not filtered_nested:
                         continue
-                    body = format_missing_journals_message_nested(filtered_nested)
-                    post_missing_journals_suggestions(
-                        zulip_sources=[{"realm": realm, "stream": stream}],
-                        zulip_realms=zulip_realms,
-                        message=body,
-                        dryrun=dryrun,
+
+                    if cfg.get("groups"):
+                        gtable = cfg["groups"][gi]
+                    else:
+                        gtable = cfg
+
+                    urls_before = list(gtable.get("urls") or [])
+                    new_urls = new_feed_urls_from_filtered_nested(
+                        filtered_nested,
+                        urls_before,
                     )
+                    journals_md = format_missing_journals_message_nested(filtered_nested)
+                    zulip_excerpt = zulip_plain_block_by_group_idx.get(gi, "")
+
+                    curated = None
+                    try:
+                        curated = curate_group_research_lists_with_kagi(
+                            kagi,
+                            group_name=str(group.get("name", "unnamed")),
+                            research_areas=list(gtable.get("research_areas") or []),
+                            excluded_areas=list(gtable.get("excluded_areas") or []),
+                            journals_markdown=journals_md,
+                            zulip_excerpt=zulip_excerpt,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Kagi research-area curation failed; group=%s", group.get("name")
+                        )
+
+                    merged_urls = list(urls_before)
+                    for u in new_urls:
+                        if u not in merged_urls:
+                            merged_urls.append(u)
+                    ra_before = list(gtable.get("research_areas") or [])
+                    ex_before = list(gtable.get("excluded_areas") or [])
+                    ra_after, ex_after = ra_before, ex_before
+                    if curated is not None:
+                        ra_after, ex_after = curated
+
+                    if merged_urls != urls_before:
+                        gtable["urls"] = merged_urls
+                        config_changed = True
+                        logger.info(
+                            "[%s] journal suggestions: added %d feed URL(s) to config",
+                            group.get("name"),
+                            len(merged_urls) - len(urls_before),
+                        )
+                    if curated is not None and (
+                        ra_after != ra_before or ex_after != ex_before
+                    ):
+                        gtable["research_areas"] = ra_after
+                        gtable["excluded_areas"] = ex_after
+                        config_changed = True
+                        logger.info(
+                            "[%s] journal suggestions: updated research_areas / excluded_areas in config",
+                            group.get("name"),
+                        )
+
+                if config_changed:
+                    if dryrun:
+                        logger.info(
+                            "[dry run] would rewrite %s with journal-suggestion updates (feeds and/or areas)",
+                            config_path,
+                        )
+                    else:
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            toml.dump(cfg, f)
+                        logger.info(
+                            "Wrote journal-suggestion updates (feeds and/or areas) to %s",
+                            config_path,
+                        )
+
+        try:
+            maybe_post_weekly_journal_config_summary(
+                config_path=config_path,
+                cfg=cfg,
+                zulip_realms=zulip_realms,
+                zulip_cfg=zulip_cfg,
+                dryrun=dryrun,
+            )
+        except Exception:
+            logger.exception("Weekly journal config summary step failed")
     finally:
         log_api_usage_summary(logger)
         log_kagi_quota_status(logger)
