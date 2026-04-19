@@ -89,6 +89,7 @@ class TestBuildEnrichment(unittest.TestCase):
         assert en is not None
         self.assertEqual(en.top_author_name, "Bob")
         self.assertEqual(en.top_h_index, 40)
+        self.assertEqual(en.top_author_affiliation, "Somewhere Institute")
         self.assertEqual(en.first_affiliation, "MIT")
         self.assertEqual(en.last_affiliation, "Stanford University")
 
@@ -139,14 +140,27 @@ class TestBatchEnrichMocked(unittest.TestCase):
 
 class TestMergeAndFallback(unittest.TestCase):
     def test_merge_prefers_openalex_when_known(self) -> None:
-        oa = PaperEnrichment("Alice", 5, "MIT", "Unknown")
-        kg = PaperEnrichment("Bob", 99, "Oxford", "Stanford")
+        oa = PaperEnrichment(
+            "Alice",
+            5,
+            "MIT",
+            "Unknown",
+            top_author_affiliation="Caltech",
+        )
+        kg = PaperEnrichment(
+            "Bob",
+            99,
+            "Oxford",
+            "Stanford",
+            top_author_affiliation="CERN",
+        )
         m = merge_paper_enrichment(oa, kg)
         assert m is not None
         self.assertEqual(m.top_author_name, "Alice")
         self.assertEqual(m.top_h_index, 5)
         self.assertEqual(m.first_affiliation, "MIT")
         self.assertEqual(m.last_affiliation, "Stanford")
+        self.assertEqual(m.top_author_affiliation, "Caltech")
 
     def test_incomplete_when_aff_unknown(self) -> None:
         en = PaperEnrichment("A", 1, "MIT", "Unknown")
@@ -170,12 +184,14 @@ class TestMergeAndFallback(unittest.TestCase):
             def fastgpt_query(self, query: str, **kwargs: object) -> str:
                 return (
                     '{"top_author_name": "Zed", "top_author_h_index": 3, '
+                    '"top_author_institution": "Inst-Z", '
                     '"first_author_institution": "U1", "last_author_institution": "U2"}'
                 )
 
         apply_kagi_metadata_backfill(by_link, [art], FakeKagi())  # type: ignore[arg-type]
         block = format_enrichment_for_feed(by_link[str(art.link)])
         self.assertIn("Zed", block)
+        self.assertIn("Inst-Z", block)
         self.assertIn("U1", block)
 
 

@@ -2,6 +2,7 @@ import unittest
 
 from rss_merge import normalize_link
 
+from openalex_enrich import PaperEnrichment
 from zulip_feedback import (
     aggregate_feedback_signals,
     count_thumbs_reactions,
@@ -46,6 +47,19 @@ class TestZulipFeedbackParsing(unittest.TestCase):
         b = format_feedback_post_body("My Paper", "https://x.org/a")
         self.assertIn("My Paper", b)
         self.assertIn("Link: https://x.org/a", b)
+
+    def test_format_feedback_post_body_includes_enrichment(self) -> None:
+        en = PaperEnrichment(
+            top_author_name="Ada Lovelace",
+            top_h_index=42,
+            first_affiliation="Unknown",
+            last_affiliation="Unknown",
+            top_author_affiliation="Analytical Engines Ltd",
+        )
+        b = format_feedback_post_body("T", "https://x.org/p", en)
+        self.assertIn("Ada Lovelace", b)
+        self.assertIn("h-index 42", b)
+        self.assertIn("Analytical Engines Ltd", b)
 
 
 class TestZulipFeedbackReactions(unittest.TestCase):
@@ -120,10 +134,10 @@ class TestZulipFeedbackSources(unittest.TestCase):
 class TestSelectTopRankedForFeedback(unittest.TestCase):
     def test_picks_two_best_by_relevance_then_impact(self) -> None:
         rows = [
-            ("Low", "https://a.org/1", 6, 9),
-            ("High rel", "https://a.org/2", 9, 3),
-            ("Mid", "https://a.org/3", 8, 8),
-            ("Tie rel lower imp", "https://a.org/4", 9, 2),
+            ("Low", "https://a.org/1", 6, 9, None),
+            ("High rel", "https://a.org/2", 9, 3, None),
+            ("Mid", "https://a.org/3", 8, 8, None),
+            ("Tie rel lower imp", "https://a.org/4", 9, 2, None),
         ]
         picked = select_top_ranked_for_feedback_posts(rows, max_posts=2)
         self.assertEqual(len(picked), 2)
@@ -132,8 +146,8 @@ class TestSelectTopRankedForFeedback(unittest.TestCase):
 
     def test_same_link_once(self) -> None:
         rows = [
-            ("A", "https://x.org/p", 9, 9),
-            ("B", "https://x.org/p/", 8, 8),
+            ("A", "https://x.org/p", 9, 9, None),
+            ("B", "https://x.org/p/", 8, 8, None),
         ]
         picked = select_top_ranked_for_feedback_posts(rows, max_posts=2)
         self.assertEqual(len(picked), 1)
@@ -141,7 +155,7 @@ class TestSelectTopRankedForFeedback(unittest.TestCase):
     def test_max_posts_zero(self) -> None:
         self.assertEqual(
             select_top_ranked_for_feedback_posts(
-                [("a", "https://z.org", 9, 9)], max_posts=0
+                [("a", "https://z.org", 9, 9, None)], max_posts=0
             ),
             [],
         )

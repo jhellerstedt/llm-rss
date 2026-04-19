@@ -381,7 +381,16 @@ def process_group(
 
     if zulip_sources and zulip_realms and passing:
         feedback_post_links = select_top_ranked_for_feedback_posts(
-            [(a.title, str(a.link), r.relevance, r.impact) for a, r in passing],
+            [
+                (
+                    a.title,
+                    str(a.link),
+                    r.relevance,
+                    r.impact,
+                    enrichment_by_link.get(str(a.link)),
+                )
+                for a, r in passing
+            ],
         )
         if feedback_post_links:
             logger.info(

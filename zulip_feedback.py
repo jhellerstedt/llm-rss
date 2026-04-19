@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from api_usage import record_zulip_api
+from openalex_enrich import PaperEnrichment, format_enrichment_for_feedback_zulip
 from rss_merge import normalize_link
 from zulip_context import fetch_messages_narrow, strip_zulip_html, _client_for_realm
 
@@ -131,15 +132,23 @@ def format_feedback_prompt_snippet(
     )
 
 
-def format_feedback_post_body(title: str, link: str) -> str:
-    return f"{title.strip()}\n\nLink: {link.strip()}"
+def format_feedback_post_body(
+    title: str,
+    link: str,
+    enrichment: PaperEnrichment | None = None,
+) -> str:
+    base = f"{title.strip()}\n\nLink: {link.strip()}"
+    extra = format_enrichment_for_feedback_zulip(enrichment)
+    if extra:
+        return f"{base}\n\n{extra}"
+    return base
 
 
 def select_top_ranked_for_feedback_posts(
-    title_link_scores: list[tuple[str, str, int, int]],
+    title_link_scores: list[tuple[str, str, int, int, PaperEnrichment | None]],
     *,
     max_posts: int = MAX_FEEDBACK_RANKING_POSTS_PER_GROUP,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, PaperEnrichment | None]]:
     """Pick up to ``max_posts`` items with highest (relevance, impact), unique by normalized link."""
     if max_posts <= 0:
         return []
@@ -147,14 +156,14 @@ def select_top_ranked_for_feedback_posts(
         title_link_scores,
         key=lambda t: (-t[2], -t[3]),
     )
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, PaperEnrichment | None]] = []
     seen_keys: set[str] = set()
-    for title, link, _rel, _imp in ranked:
+    for title, link, _rel, _imp, en in ranked:
         key = normalize_link(link)
         if key in seen_keys:
             continue
         seen_keys.add(key)
-        out.append((title, link))
+        out.append((title, link, en))
         if len(out) >= max_posts:
             break
     return out
@@ -193,7 +202,7 @@ def post_feedback_ranking_for_new_items(
     zulip_realms: dict[str, dict[str, str]],
     *,
     messages_by_pair: dict[tuple[str, str], list[dict[str, Any]]],
-    titles_and_links: list[tuple[str, str]],
+    titles_and_links: list[tuple[str, str, PaperEnrichment | None]],
     dryrun: bool,
     max_sends_per_group: int = MAX_FEEDBACK_RANKING_POSTS_PER_GROUP,
 ) -> None:
@@ -215,13 +224,13 @@ def post_feedback_ranking_for_new_items(
         except KeyError as e:
             logger.error("%s", e)
             continue
-        for title, link in titles_and_links:
+        for title, link, enrichment in titles_and_links:
             if sends_left <= 0:
                 return
             key = normalize_link(link)
             if key in posted:
                 continue
-            body = format_feedback_post_body(title, link)
+            body = format_feedback_post_body(title, link, enrichment)
             if dryrun:
                 logger.info(
                     "[dry run] would post feedback ranking realm=%s stream=%s link=%s",

@@ -49,12 +49,15 @@ class PaperEnrichment:
     top_h_index: int
     first_affiliation: str
     last_affiliation: str
+    top_author_affiliation: str = "Unknown"
 
     def format_block(self) -> str:
         lines = [
             f"Highest h-index author on this paper: {self.top_author_name} "
             f"(h-index {self.top_h_index})",
         ]
+        if not _is_unknown(self.top_author_affiliation):
+            lines.append(f"That author's affiliation: {self.top_author_affiliation}")
         if self.first_affiliation == self.last_affiliation:
             lines.append(
                 f"Institution (first & last author): {self.first_affiliation}"
@@ -88,6 +91,8 @@ def paper_enrichment_has_any_signal(en: PaperEnrichment | None) -> bool:
         return True
     if en.top_h_index > 0:
         return True
+    if not _is_unknown(en.top_author_affiliation):
+        return True
     if not _is_unknown(en.first_affiliation):
         return True
     if not _is_unknown(en.last_affiliation):
@@ -120,11 +125,17 @@ def merge_paper_enrichment(
         if not _is_unknown(openalex.last_affiliation)
         else kagi.last_affiliation
     )
+    top_aff = (
+        openalex.top_author_affiliation
+        if not _is_unknown(openalex.top_author_affiliation)
+        else kagi.top_author_affiliation
+    )
     return PaperEnrichment(
         top_author_name=top_name,
         top_h_index=top_h,
         first_affiliation=first,
         last_affiliation=last,
+        top_author_affiliation=top_aff,
     )
 
 
@@ -134,9 +145,23 @@ def format_enrichment_for_feed(en: PaperEnrichment | None) -> str:
     return en.format_block()
 
 
+def format_enrichment_for_feedback_zulip(en: PaperEnrichment | None) -> str:
+    """Short lines for Zulip feedback ranking (h-index author + affiliation when known)."""
+    if en is None or not paper_enrichment_has_any_signal(en):
+        return ""
+    lines: list[str] = []
+    if not _is_unknown(en.top_author_name) or en.top_h_index > 0:
+        name = en.top_author_name if not _is_unknown(en.top_author_name) else "Unknown"
+        lines.append(f"Highest h-index author: {name} (h-index {en.top_h_index})")
+    if not _is_unknown(en.top_author_affiliation):
+        lines.append(f"That author's affiliation: {en.top_author_affiliation}")
+    return "\n".join(lines).strip()
+
+
 class _KagiMetadataJson(BaseModel):
     top_author_name: str = Field(default="Unknown")
     top_author_h_index: int = Field(default=0, ge=0)
+    top_author_institution: str = Field(default="Unknown")
     first_author_institution: str = Field(default="Unknown")
     last_author_institution: str = Field(default="Unknown")
 
@@ -153,11 +178,12 @@ RSS author line (may be incomplete): {authors_line}
 Respond with ONLY a single JSON object (no markdown code fences, no other text) with exactly these keys:
 "top_author_name" (string: full name of the listed author on this paper with the highest h-index you can verify; "Unknown" if unclear),
 "top_author_h_index" (integer >= 0; use 0 only if the name is Unknown or h-index cannot be found),
+"top_author_institution" (string: that same author's primary institution; "Unknown" if unclear),
 "first_author_institution" (string: primary institution or affiliation of the first author; "Unknown" if unclear),
 "last_author_institution" (string: primary institution of the last/senior author; "Unknown" if unclear).
 
 If there is only one author, repeat the same institution in both institution fields.
-Example: {{"top_author_name": "...", "top_author_h_index": 12, "first_author_institution": "...", "last_author_institution": "..."}}
+Example: {{"top_author_name": "...", "top_author_h_index": 12, "top_author_institution": "...", "first_author_institution": "...", "last_author_institution": "..."}}
 """
     try:
         raw = kagi.fastgpt_query(query, openalex_fallback=True)
@@ -189,6 +215,7 @@ Example: {{"top_author_name": "...", "top_author_h_index": 12, "first_author_ins
         top_h_index=int(m.top_author_h_index),
         first_affiliation=m.first_author_institution.strip() or "Unknown",
         last_affiliation=m.last_author_institution.strip() or "Unknown",
+        top_author_affiliation=m.top_author_institution.strip() or "Unknown",
     )
 
 
@@ -405,11 +432,16 @@ def build_enrichment_for_work(
     first_aff = affiliation_for_authorship(first_a) if first_a else "Unknown"
     last_aff = affiliation_for_authorship(last_a) if last_a else "Unknown"
 
+    top_aff = "Unknown"
+    if best_idx is not None and 0 <= best_idx < len(authorships):
+        top_aff = affiliation_for_authorship(authorships[best_idx])
+
     return PaperEnrichment(
         top_author_name=top_name,
         top_h_index=top_h,
         first_affiliation=first_aff,
         last_affiliation=last_aff,
+        top_author_affiliation=top_aff,
     )
 
 
