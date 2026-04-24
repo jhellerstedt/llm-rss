@@ -183,9 +183,11 @@ class TestMergeAndFallback(unittest.TestCase):
         class FakeKagi:
             def fastgpt_query(self, query: str, **kwargs: object) -> str:
                 return (
-                    '{"top_author_name": "Zed", "top_author_h_index": 3, '
+                    '{"papers": [{"paper_id": "https://example.com/p", '
+                    '"top_author_name": "Zed", "top_author_h_index": 3, '
                     '"top_author_institution": "Inst-Z", '
-                    '"first_author_institution": "U1", "last_author_institution": "U2"}'
+                    '"first_author_institution": "U1", '
+                    '"last_author_institution": "U2"}]}'
                 )
 
         apply_kagi_metadata_backfill(by_link, [art], FakeKagi())  # type: ignore[arg-type]
@@ -193,6 +195,46 @@ class TestMergeAndFallback(unittest.TestCase):
         self.assertIn("Zed", block)
         self.assertIn("Inst-Z", block)
         self.assertIn("U1", block)
+
+    def test_apply_kagi_backfill_one_fastgpt_for_two_papers(self) -> None:
+        calls: list[int] = []
+
+        class FakeKagi:
+            def fastgpt_query(self, query: str, **kwargs: object) -> str:
+                calls.append(1)
+                return (
+                    '{"papers": ['
+                    '{"paper_id": "https://a.example/a", "top_author_name": "A1", '
+                    '"top_author_h_index": 1, "top_author_institution": "Ta", '
+                    '"first_author_institution": "Fa", "last_author_institution": "La"},'
+                    '{"paper_id": "https://b.example/b", "top_author_name": "B1", '
+                    '"top_author_h_index": 2, "top_author_institution": "Tb", '
+                    '"first_author_institution": "Fb", "last_author_institution": "Lb"}'
+                    "]}"
+                )
+
+        a1 = ArticleInfo(
+            title="T1",
+            link="https://a.example/a",
+            abstract="",
+            updated=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            authors="",
+        )
+        a2 = ArticleInfo(
+            title="T2",
+            link="https://b.example/b",
+            abstract="",
+            updated=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            authors="",
+        )
+        by_link: dict[str, PaperEnrichment | None] = {
+            str(a1.link): None,
+            str(a2.link): None,
+        }
+        apply_kagi_metadata_backfill(by_link, [a1, a2], FakeKagi())  # type: ignore[arg-type]
+        self.assertEqual(len(calls), 1)
+        self.assertIn("A1", format_enrichment_for_feed(by_link[str(a1.link)]))
+        self.assertIn("B1", format_enrichment_for_feed(by_link[str(a2.link)]))
 
 
 if __name__ == "__main__":

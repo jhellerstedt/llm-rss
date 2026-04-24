@@ -166,50 +166,23 @@ class _KagiMetadataJson(BaseModel):
     last_author_institution: str = Field(default="Unknown")
 
 
-def fetch_metadata_via_kagi(kagi: KagiClient, article: ArticleInfo) -> PaperEnrichment | None:
-    authors_line = (article.authors or "").strip() or "(not provided)"
-    query = f"""You are extracting bibliometric metadata for an academic paper. Use web search if it helps.
+class _KagiBatchPaperItem(BaseModel):
+    """One row in a batched FastGPT metadata response."""
 
-Paper title: {article.title}
-Link: {article.link}
-Abstract: {article.abstract}
-RSS author line (may be incomplete): {authors_line}
+    paper_id: str = Field(..., min_length=1)
+    top_author_name: str = Field(default="Unknown")
+    top_author_h_index: int = Field(default=0, ge=0)
+    top_author_institution: str = Field(default="Unknown")
+    first_author_institution: str = Field(default="Unknown")
+    last_author_institution: str = Field(default="Unknown")
 
-Respond with ONLY a single JSON object (no markdown code fences, no other text) with exactly these keys:
-"top_author_name" (string: full name of the listed author on this paper with the highest h-index you can verify; "Unknown" if unclear),
-"top_author_h_index" (integer >= 0; use 0 only if the name is Unknown or h-index cannot be found),
-"top_author_institution" (string: that same author's primary institution; "Unknown" if unclear),
-"first_author_institution" (string: primary institution or affiliation of the first author; "Unknown" if unclear),
-"last_author_institution" (string: primary institution of the last/senior author; "Unknown" if unclear).
 
-If there is only one author, repeat the same institution in both institution fields.
-Example: {{"top_author_name": "...", "top_author_h_index": 12, "top_author_institution": "...", "first_author_institution": "...", "last_author_institution": "..."}}
-"""
-    try:
-        raw = kagi.fastgpt_query(query, openalex_fallback=True)
-    except Exception as e:
-        if isinstance(e, (KagiOpenAlexFallbackQuotaExceeded, KagiSessionQuotaExceeded)):
-            logger.info(
-                "Skipping Kagi metadata for %r: %s",
-                article.title[:60],
-                e,
-            )
-            return None
-        logger.warning("Kagi metadata query failed for %r: %s", article.title[:60], e)
-        return None
-    data = try_load_json_object_from_llm(raw)
-    if not data:
-        logger.warning(
-            "Kagi metadata JSON parse failed for %r; snippet=%s",
-            article.title[:60],
-            raw[:400],
-        )
-        return None
-    try:
-        m = _KagiMetadataJson.model_validate(data)
-    except ValidationError as e:
-        logger.warning("Kagi metadata validation failed for %r: %s", article.title[:60], e)
-        return None
+# OpenAlex gaps are filled in chunked Kagi calls (one FastGPT invocation per chunk).
+METADATA_KAGI_BATCH_MAX = 12
+_METADATA_ABSTRACT_CHARS_PER_PAPER = 1800
+
+
+def _enrichment_from_kagi_metadata_json(m: _KagiMetadataJson) -> PaperEnrichment:
     return PaperEnrichment(
         top_author_name=m.top_author_name.strip() or "Unknown",
         top_h_index=int(m.top_author_h_index),
@@ -219,19 +192,131 @@ Example: {{"top_author_name": "...", "top_author_h_index": 12, "top_author_insti
     )
 
 
+def _paper_block_for_kagi_batch(art: ArticleInfo) -> str:
+    authors_line = (art.authors or "").strip() or "(not provided)"
+    pid = str(art.link)
+    abst = (art.abstract or "").strip()
+    if len(abst) > _METADATA_ABSTRACT_CHARS_PER_PAPER:
+        abst = abst[:_METADATA_ABSTRACT_CHARS_PER_PAPER] + "\n[truncated]"
+    return (
+        f"paper_id: {pid}\n"
+        f"Title: {art.title}\n"
+        f"Link: {art.link}\n"
+        f"Abstract:\n{abst}\n"
+        f"RSS author line (may be incomplete): {authors_line}\n"
+    )
+
+
+def fetch_metadata_batch_via_kagi(
+    kagi: KagiClient, articles: list[ArticleInfo]
+) -> dict[str, PaperEnrichment]:
+    """One FastGPT call for many papers; map link -> enrichment (omits failures)."""
+    if not articles:
+        return {}
+    expected = {str(a.link) for a in articles}
+    blocks = [_paper_block_for_kagi_batch(a) for a in articles]
+    joined = "\n---\n".join(blocks)
+    n = len(articles)
+    prompt = f"""You are extracting bibliometric metadata for {n} academic paper(s). Use web search if it helps.
+
+Each paper below is separated by ---. The line paper_id identifies that paper; you MUST echo the same paper_id string in your JSON output for that paper.
+
+{joined}
+
+Respond with ONLY a single JSON object (no markdown code fences, no other text) with exactly one key:
+"papers": array of {n} object(s) — one per paper above, in any order. Each object must have:
+- "paper_id": string (exactly one of the paper_id values from above)
+- "top_author_name": string (full name of the listed author with highest verifiable h-index; "Unknown" if unclear)
+- "top_author_h_index": integer >= 0 (0 if name is Unknown or h-index unknown)
+- "top_author_institution": string
+- "first_author_institution": string
+- "last_author_institution": string
+
+If a paper has only one author, repeat the same institution in first and last author fields when appropriate. Apply rules independently per paper.
+"""
+    try:
+        raw = kagi.fastgpt_query(prompt, openalex_fallback=True)
+    except Exception as e:
+        if isinstance(e, (KagiOpenAlexFallbackQuotaExceeded, KagiSessionQuotaExceeded)):
+            logger.info(
+                "Skipping Kagi metadata batch for %d paper(s): %s",
+                n,
+                e,
+            )
+            return {}
+        logger.warning("Kagi metadata batch query failed (%d papers): %s", n, e)
+        return {}
+    data = try_load_json_object_from_llm(raw or "")
+    if not data:
+        logger.warning(
+            "Kagi metadata batch JSON parse failed (%d papers); snippet=%s",
+            n,
+            (raw or "")[:500],
+        )
+        return {}
+    papers_raw = data.get("papers")
+    if papers_raw is None and isinstance(data, list):
+        papers_raw = data
+    if not isinstance(papers_raw, list):
+        logger.warning(
+            "Kagi metadata batch: expected papers array (%d papers); snippet=%s",
+            n,
+            (raw or "")[:400],
+        )
+        return {}
+    out: dict[str, PaperEnrichment] = {}
+    for i, item in enumerate(papers_raw):
+        if not isinstance(item, dict):
+            continue
+        try:
+            row = _KagiBatchPaperItem.model_validate(item)
+        except ValidationError as e:
+            logger.warning("Kagi metadata batch row %d invalid: %s", i, e)
+            continue
+        pid = str(row.paper_id).strip()
+        if pid not in expected:
+            logger.debug("Kagi metadata batch: unexpected paper_id %r", pid[:120])
+            continue
+        meta = _KagiMetadataJson(
+            top_author_name=row.top_author_name,
+            top_author_h_index=row.top_author_h_index,
+            top_author_institution=row.top_author_institution,
+            first_author_institution=row.first_author_institution,
+            last_author_institution=row.last_author_institution,
+        )
+        out[pid] = _enrichment_from_kagi_metadata_json(meta)
+    return out
+
+
+def fetch_metadata_via_kagi(kagi: KagiClient, article: ArticleInfo) -> PaperEnrichment | None:
+    """Single-paper convenience wrapper (one batched FastGPT call)."""
+    got = fetch_metadata_batch_via_kagi(kagi, [article])
+    return got.get(str(article.link))
+
+
 def apply_kagi_metadata_backfill(
     by_link: dict[str, PaperEnrichment | None],
     articles: list[ArticleInfo],
     kagi: KagiClient,
 ) -> None:
-    """Mutates by_link: runs Kagi when enrichment is incomplete."""
+    """Mutates by_link: runs Kagi when enrichment is incomplete (batched FastGPT calls)."""
+    need: list[ArticleInfo] = []
     for art in articles:
         link = str(art.link)
         cur = by_link.get(link)
-        if not paper_enrichment_incomplete(cur):
-            continue
-        kg = fetch_metadata_via_kagi(kagi, art)
-        by_link[link] = merge_paper_enrichment(cur, kg)
+        if paper_enrichment_incomplete(cur):
+            need.append(art)
+    if not need:
+        return
+    batch_size = max(1, int(METADATA_KAGI_BATCH_MAX))
+    for i in range(0, len(need), batch_size):
+        batch = need[i : i + batch_size]
+        got = fetch_metadata_batch_via_kagi(kagi, batch)
+        for art in batch:
+            link = str(art.link)
+            cur = by_link.get(link)
+            kg = got.get(link)
+            by_link[link] = merge_paper_enrichment(cur, kg)
 
 
 def _norm_title(t: str) -> str:

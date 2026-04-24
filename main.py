@@ -22,7 +22,14 @@ from openalex_enrich import (
 )
 from api_usage import log_api_usage_summary, reset_api_usage_stats
 from kagi_batch_scoring import score_article_batch_with_kagi
-from kagi_quota import log_kagi_quota_status, plan_scoring_budget, reset_kagi_session_quota
+from kagi_quota import (
+    KagiSessionQuotaExceeded,
+    MAX_KAGI_INVOCATIONS_PER_RUN,
+    log_kagi_quota_status,
+    plan_scoring_budget,
+    remaining_kagi_invocations,
+    reset_kagi_session_quota,
+)
 from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history, normalize_link
 from zulip_context import build_zulip_context_and_messages, load_zulip_realms
 from zulip_feedback import (
@@ -543,6 +550,7 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
 
             if allowed_set:
                 config_changed = False
+                research_area_kagi_skip_logged = False
                 for gi, group in enumerate(groups):
                     nested = suggestions_by_group_idx.get(gi)
                     if not nested:
@@ -565,19 +573,36 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                     zulip_excerpt = zulip_plain_block_by_group_idx.get(gi, "")
 
                     curated = None
-                    try:
-                        curated = curate_group_research_lists_with_kagi(
-                            kagi,
-                            group_name=str(group.get("name", "unnamed")),
-                            research_areas=list(gtable.get("research_areas") or []),
-                            excluded_areas=list(gtable.get("excluded_areas") or []),
-                            journals_markdown=journals_md,
-                            zulip_excerpt=zulip_excerpt,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Kagi research-area curation failed; group=%s", group.get("name")
-                        )
+                    if remaining_kagi_invocations() < 1:
+                        if not research_area_kagi_skip_logged:
+                            logger.warning(
+                                "Kagi session quota exhausted (%s invocations/run); skipping "
+                                "research-area curation for remaining groups (feed URL updates still apply).",
+                                MAX_KAGI_INVOCATIONS_PER_RUN,
+                            )
+                            research_area_kagi_skip_logged = True
+                    else:
+                        try:
+                            curated = curate_group_research_lists_with_kagi(
+                                kagi,
+                                group_name=str(group.get("name", "unnamed")),
+                                research_areas=list(gtable.get("research_areas") or []),
+                                excluded_areas=list(gtable.get("excluded_areas") or []),
+                                journals_markdown=journals_md,
+                                zulip_excerpt=zulip_excerpt,
+                            )
+                        except KagiSessionQuotaExceeded:
+                            if not research_area_kagi_skip_logged:
+                                logger.warning(
+                                    "Kagi session quota hit during research-area curation; "
+                                    "skipping curation for this group and later ones (feed URL updates still apply)."
+                                )
+                                research_area_kagi_skip_logged = True
+                        except Exception:
+                            logger.exception(
+                                "Kagi research-area curation failed; group=%s",
+                                group.get("name"),
+                            )
 
                     merged_urls = list(urls_before)
                     for u in new_urls:
