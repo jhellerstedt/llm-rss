@@ -68,6 +68,28 @@ def resolve_rss_path(rss_path: str | os.PathLike[str]) -> str:
     return str((REPO_ROOT / p).resolve())
 
 
+def _pick_feed_openalex_concept(enrichments: list[PaperEnrichment | None]) -> str | None:
+    counts: dict[str, int] = {}
+    for en in enrichments:
+        if en is None:
+            continue
+        c = str(getattr(en, "top_concept", "") or "").strip()
+        if not c or c.lower() == "unknown":
+            continue
+        counts[c] = counts.get(c, 0) + 1
+    if not counts:
+        return None
+    best_n = max(counts.values())
+    return sorted([c for c, n in counts.items() if n == best_n])[0]
+
+
+def _format_feed_description(group_name: str, openalex_concept: str | None) -> str:
+    base = f"LLM-filtered feed ({group_name})"
+    if not openalex_concept:
+        return base
+    return f"{base} — OpenAlex concept: {openalex_concept}"
+
+
 def to_bullets(text_list: list[str]) -> str:
     return "\n".join(f"- {item}" for item in text_list)
 
@@ -134,6 +156,7 @@ def _legacy_group(cfg: dict) -> dict:
         "research_areas": cfg["research_areas"],
         "excluded_areas": cfg["excluded_areas"],
         "rss_path": resolve_rss_path(cfg.get("rss_path", "data/rss.xml")),
+        "feed_link": str(cfg.get("feed_link", "myserver")),
         "rss_max_items": int(cfg.get("rss_max_items", 25)),
         "period": cfg.get("period", 24),
         "relevance_threshold": cfg.get("relevance_threshold", 5),
@@ -156,6 +179,7 @@ def expand_groups(cfg: dict) -> list[dict]:
                 "rss_path": resolve_rss_path(
                     g.get("rss_path", cfg.get("rss_path", "data/rss.xml"))
                 ),
+                "feed_link": str(g.get("feed_link", cfg.get("feed_link", "myserver"))),
                 "rss_max_items": int(
                     g.get("rss_max_items", cfg.get("rss_max_items", 25))
                 ),
@@ -204,6 +228,7 @@ def process_group(
     kagi_batch_size: int = 5,
 ) -> None:
     rss_path = group["rss_path"]
+    feed_link = str(group.get("feed_link", "myserver"))
     period = group["period"]
     relevance_threshold = group["relevance_threshold"]
     impact_threshold = group["impact_threshold"]
@@ -420,10 +445,13 @@ def process_group(
     n_kept = len(merged)
 
     feed_title = group_name.replace("_", " ").strip().title()
+    feed_concept = _pick_feed_openalex_concept(
+        [enrichment_by_link.get(str(a.link)) for a, _r in passing]
+    )
     new_feed = Rss201rev2Feed(
         title=feed_title,
-        link="myserver",
-        description=f"LLM-filtered feed ({group_name})",
+        link=feed_link,
+        description=_format_feed_description(group_name, feed_concept),
         language="en",
     )
     for item in merged:

@@ -24,6 +24,9 @@ enabled = true
 kagi_fallback = true
 # mailto = "you@example.com"
 
+# Channel <link> value used in RSS XML output (per-group override supported via groups[].feed_link).
+feed_link = "jhell.imipolex.biz/feeds"
+
 # Zulip realms: JSON map realm_name -> { email, api_key, site }
 # Or set ZULIP_REALMS_CONFIG_FILE / ZULIP_REALM_<NAME>_EMAIL, etc. (see README)
 [zulip]

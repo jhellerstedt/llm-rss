@@ -81,6 +81,12 @@ class TestBuildEnrichment(unittest.TestCase):
                     "institutions": [{"display_name": "Stanford University"}],
                 },
             ]
+            ,
+            "concepts": [
+                {"display_name": "Physics", "score": 0.2},
+                {"display_name": "Biomedical signal processing", "score": 0.91},
+                {"display_name": "Engineering", "score": 0.7},
+            ],
         }
         metrics = {
             "https://openalex.org/A1": AuthorMetric("Alice", 10),
@@ -94,6 +100,7 @@ class TestBuildEnrichment(unittest.TestCase):
         self.assertEqual(en.top_author_affiliation, "Somewhere Institute")
         self.assertEqual(en.first_affiliation, "MIT")
         self.assertEqual(en.last_affiliation, "Stanford University")
+        self.assertEqual(en.top_concept, "Biomedical signal processing")
 
     def test_single_affiliation_line_when_same(self) -> None:
         en = PaperEnrichment(
