@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
 
 import requests
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from adapter import ArticleInfo
 from api_usage import record_openalex_http
@@ -21,6 +21,10 @@ if TYPE_CHECKING:
     from kagi_client import KagiClient
 
 logger = logging.getLogger(__name__)
+
+# Individual h-index above this is not credible (models often substitute citation
+# totals, i10-index, or other counts). Real-world scholar h-indices stay far below.
+_MAX_PLAUSIBLE_AUTHOR_H_INDEX = 400
 
 OPENALEX_BASE = "https://api.openalex.org"
 _HTTP_HEADERS = {"User-Agent": "llm-rss/openalex-enrich"}
@@ -73,6 +77,26 @@ def _is_unknown(s: str) -> bool:
     return not t or t.lower() == "unknown"
 
 
+def _norm_person_name(name: str) -> str:
+    """Lowercase + collapsed whitespace for comparing author strings across sources."""
+    t = str(name).strip().lower()
+    return re.sub(r"\s+", " ", t)
+
+
+def _plausible_author_h_index(h: int) -> int:
+    """Drop obviously wrong h-index values (LLM / source confusion with citations)."""
+    if h <= 0:
+        return 0
+    if h > _MAX_PLAUSIBLE_AUTHOR_H_INDEX:
+        logger.warning(
+            "Ignoring implausible author h-index %d (cap %d)",
+            h,
+            _MAX_PLAUSIBLE_AUTHOR_H_INDEX,
+        )
+        return 0
+    return h
+
+
 def paper_enrichment_incomplete(en: PaperEnrichment | None) -> bool:
     """True if OpenAlex (or prior step) left any field we try to backfill via Kagi."""
     if en is None:
@@ -115,6 +139,16 @@ def merge_paper_enrichment(
     else:
         top_name = openalex.top_author_name
         top_h = openalex.top_h_index
+        # OpenAlex often has the right author but h-index 0 (new profile / missing
+        # stats). Kagi may have a verifiable h-index for the same person; only merge
+        # h when names agree so we do not attach a senior co-author's h to someone else.
+        if (
+            top_h == 0
+            and kagi.top_h_index > 0
+            and not _is_unknown(kagi.top_author_name)
+            and _norm_person_name(top_name) == _norm_person_name(kagi.top_author_name)
+        ):
+            top_h = kagi.top_h_index
     first = (
         openalex.first_affiliation
         if not _is_unknown(openalex.first_affiliation)
@@ -165,6 +199,11 @@ class _KagiMetadataJson(BaseModel):
     first_author_institution: str = Field(default="Unknown")
     last_author_institution: str = Field(default="Unknown")
 
+    @field_validator("top_author_h_index", mode="after")
+    @classmethod
+    def _cap_h_index(cls, v: int) -> int:
+        return _plausible_author_h_index(v)
+
 
 class _KagiBatchPaperItem(BaseModel):
     """One row in a batched FastGPT metadata response."""
@@ -175,6 +214,11 @@ class _KagiBatchPaperItem(BaseModel):
     top_author_institution: str = Field(default="Unknown")
     first_author_institution: str = Field(default="Unknown")
     last_author_institution: str = Field(default="Unknown")
+
+    @field_validator("top_author_h_index", mode="after")
+    @classmethod
+    def _cap_h_index(cls, v: int) -> int:
+        return _plausible_author_h_index(v)
 
 
 # OpenAlex gaps are filled in chunked Kagi calls (one FastGPT invocation per chunk).
@@ -227,7 +271,7 @@ Respond with ONLY a single JSON object (no markdown code fences, no other text) 
 "papers": array of {n} object(s) — one per paper above, in any order. Each object must have:
 - "paper_id": string (exactly one of the paper_id values from above)
 - "top_author_name": string (full name of the listed author with highest verifiable h-index; "Unknown" if unclear)
-- "top_author_h_index": integer >= 0 (0 if name is Unknown or h-index unknown)
+- "top_author_h_index": integer >= 0 (0 if name is Unknown or h-index unknown). This must be the bibliometric **h-index** (Hirsch index: h papers with at least h citations each), NOT total citations, NOT i10-index, NOT publication count. Typical values are under 150 even for very prominent researchers.
 - "top_author_institution": string
 - "first_author_institution": string
 - "last_author_institution": string
@@ -444,7 +488,8 @@ def fetch_author_metric(author_openalex_id_url: str, mailto: str) -> AuthorMetri
         h = int(stats.get("h_index") or 0)
     except (TypeError, ValueError):
         h = 0
-    return AuthorMetric(display_name=name or "Unknown", h_index=max(0, h))
+    h = _plausible_author_h_index(max(0, h))
+    return AuthorMetric(display_name=name or "Unknown", h_index=h)
 
 
 def affiliation_for_authorship(a: dict[str, Any]) -> str:

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from openalex_enrich import (
     AuthorMetric,
     PaperEnrichment,
+    _KagiBatchPaperItem,
     apply_kagi_metadata_backfill,
     batch_enrich_articles,
     build_enrichment_for_work,
@@ -16,6 +17,7 @@ from openalex_enrich import (
     merge_paper_enrichment,
     paper_enrichment_incomplete,
     direct_openalex_work_urls,
+    fetch_author_metric,
 )
 
 
@@ -138,6 +140,30 @@ class TestBatchEnrichMocked(unittest.TestCase):
         self.assertIn("Solo", block)
 
 
+class TestPlausibleHIndex(unittest.TestCase):
+    def test_kagi_batch_clamps_citation_mislabeled_as_h_index(self) -> None:
+        row = _KagiBatchPaperItem.model_validate(
+            {
+                "paper_id": "https://example.com/p",
+                "top_author_name": "A",
+                "top_author_h_index": 3136,
+                "top_author_institution": "U",
+                "first_author_institution": "U",
+                "last_author_institution": "U",
+            }
+        )
+        self.assertEqual(row.top_author_h_index, 0)
+
+    @patch("openalex_enrich._get_json")
+    def test_openalex_author_clamps_absurd_h(self, mock_get: unittest.mock.MagicMock) -> None:
+        mock_get.return_value = {
+            "display_name": "X",
+            "summary_stats": {"h_index": 9000},
+        }
+        m = fetch_author_metric("https://openalex.org/A123", "")
+        self.assertEqual(m.h_index, 0)
+
+
 class TestMergeAndFallback(unittest.TestCase):
     def test_merge_prefers_openalex_when_known(self) -> None:
         oa = PaperEnrichment(
@@ -158,9 +184,49 @@ class TestMergeAndFallback(unittest.TestCase):
         assert m is not None
         self.assertEqual(m.top_author_name, "Alice")
         self.assertEqual(m.top_h_index, 5)
+
+    def test_merge_fills_h_from_kagi_when_same_name_and_oa_h_zero(self) -> None:
+        oa = PaperEnrichment(
+            "Ying Yuan",
+            0,
+            "MIT",
+            "MIT",
+            top_author_affiliation="Unknown",
+        )
+        kg = PaperEnrichment(
+            "Ying Yuan",
+            32,
+            "X",
+            "Y",
+            top_author_affiliation="Z",
+        )
+        m = merge_paper_enrichment(oa, kg)
+        assert m is not None
+        self.assertEqual(m.top_author_name, "Ying Yuan")
+        self.assertEqual(m.top_h_index, 32)
+
+    def test_merge_does_not_take_kagi_h_when_names_differ(self) -> None:
+        oa = PaperEnrichment(
+            "Alice",
+            0,
+            "MIT",
+            "MIT",
+            top_author_affiliation="Unknown",
+        )
+        kg = PaperEnrichment(
+            "Bob",
+            99,
+            "X",
+            "Y",
+            top_author_affiliation="Z",
+        )
+        m = merge_paper_enrichment(oa, kg)
+        assert m is not None
+        self.assertEqual(m.top_h_index, 0)
         self.assertEqual(m.first_affiliation, "MIT")
-        self.assertEqual(m.last_affiliation, "Stanford")
-        self.assertEqual(m.top_author_affiliation, "Caltech")
+        self.assertEqual(m.last_affiliation, "MIT")
+        # OpenAlex doesn't know top-author affiliation here, so we take Kagi's.
+        self.assertEqual(m.top_author_affiliation, "Z")
 
     def test_incomplete_when_aff_unknown(self) -> None:
         en = PaperEnrichment("A", 1, "MIT", "Unknown")
