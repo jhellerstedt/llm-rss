@@ -1,60 +1,28 @@
 import unittest
 
-from openalex_enrich import PaperEnrichment
-
-from main import _format_feed_description, _pick_feed_openalex_concept
+from main import _format_feed_description, _normalize_feed_category
 
 
 class TestFeedChannelMetadata(unittest.TestCase):
-    def test_description_without_concept(self) -> None:
+    def test_description_without_category(self) -> None:
         self.assertEqual(
             _format_feed_description("biomedical_signal_processing", None),
             "LLM-filtered feed (biomedical_signal_processing)",
         )
 
-    def test_description_with_concept(self) -> None:
+    def test_description_with_category(self) -> None:
         self.assertEqual(
-            _format_feed_description(
-                "biomedical_signal_processing", "Biomedical signal processing"
-            ),
-            "LLM-filtered feed (biomedical_signal_processing) — OpenAlex concept: Biomedical signal processing",
+            _format_feed_description("biomedical_signal_processing", "biomedical"),
+            "LLM-filtered feed (biomedical_signal_processing) — category: biomedical",
         )
 
-    def test_pick_concept_mode(self) -> None:
-        a = PaperEnrichment(
-            top_author_name="A",
-            top_h_index=1,
-            first_affiliation="X",
-            last_affiliation="Y",
-            top_concept="Physics",
-        )
-        b = PaperEnrichment(
-            top_author_name="B",
-            top_h_index=2,
-            first_affiliation="X",
-            last_affiliation="Y",
-            top_concept="Physics",
-        )
-        c = PaperEnrichment(
-            top_author_name="C",
-            top_h_index=3,
-            first_affiliation="X",
-            last_affiliation="Y",
-            top_concept="Engineering",
-        )
-        self.assertEqual(_pick_feed_openalex_concept([a, b, c]), "Physics")
+    def test_normalize_category_first_word_only(self) -> None:
+        self.assertEqual(_normalize_feed_category("  plasma  extra  "), "plasma")
 
-    def test_pick_concept_ignores_unknown_and_none(self) -> None:
-        a = PaperEnrichment(
-            top_author_name="A",
-            top_h_index=1,
-            first_affiliation="X",
-            last_affiliation="Y",
-            top_concept="Unknown",
-        )
-        self.assertIsNone(_pick_feed_openalex_concept([None, a]))
+    def test_normalize_category_empty(self) -> None:
+        self.assertIsNone(_normalize_feed_category(""))
+        self.assertIsNone(_normalize_feed_category(None))
 
 
 if __name__ == "__main__":
     unittest.main()
-

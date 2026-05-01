@@ -54,7 +54,6 @@ class PaperEnrichment:
     first_affiliation: str
     last_affiliation: str
     top_author_affiliation: str = "Unknown"
-    top_concept: str = "Unknown"
 
     def format_block(self) -> str:
         lines = [
@@ -165,18 +164,12 @@ def merge_paper_enrichment(
         if not _is_unknown(openalex.top_author_affiliation)
         else kagi.top_author_affiliation
     )
-    concept = (
-        openalex.top_concept
-        if not _is_unknown(openalex.top_concept)
-        else kagi.top_concept
-    )
     return PaperEnrichment(
         top_author_name=top_name,
         top_h_index=top_h,
         first_affiliation=first,
         last_affiliation=last,
         top_author_affiliation=top_aff,
-        top_concept=concept,
     )
 
 
@@ -573,31 +566,12 @@ def build_enrichment_for_work(
     if best_idx is not None and 0 <= best_idx < len(authorships):
         top_aff = affiliation_for_authorship(authorships[best_idx])
 
-    top_concept = "Unknown"
-    concepts = work.get("concepts") or []
-    best_score: float = -1.0
-    if isinstance(concepts, list):
-        for c in concepts:
-            if not isinstance(c, dict):
-                continue
-            dn = str(c.get("display_name") or "").strip()
-            if not dn:
-                continue
-            try:
-                sc = float(c.get("score") or 0.0)
-            except (TypeError, ValueError):
-                sc = 0.0
-            if sc > best_score:
-                best_score = sc
-                top_concept = dn
-
     return PaperEnrichment(
         top_author_name=top_name,
         top_h_index=top_h,
         first_affiliation=first_aff,
         last_affiliation=last_aff,
         top_author_affiliation=top_aff,
-        top_concept=top_concept,
     )
 
 

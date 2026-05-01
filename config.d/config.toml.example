@@ -38,6 +38,9 @@ context_max_chars = 12000
 # Topical group 1: condensed matter / general physics journals
 [[groups]]
 name = "cm_physics"
+# Optional: single token appended to RSS channel <description> as "— category: …" for site grouping.
+# Alias key: `category` (same meaning).
+feed_category = "cm"
 urls = [
     "https://www.nature.com/ncomms.rss",
     "https://www.nature.com/nphys.rss",
@@ -73,6 +76,7 @@ impact_threshold = 3
 # Topical group 2: preprints example
 [[groups]]
 name = "plasma_preprints"
+feed_category = "plasma"
 urls = [
     "http://rss.arxiv.org/rss/physics.plasm-ph",
 ]
