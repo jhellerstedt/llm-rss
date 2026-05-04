@@ -1,6 +1,7 @@
 """Post a weekly Zulip digest of config.toml changes under topic \"journal suggestions\"."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import time
@@ -22,6 +23,23 @@ def _state_path(config_path: Path) -> Path:
     return config_path.with_name(f"{config_path.stem}.journal_weekly_summary_state.json")
 
 
+def _normalize_feed_category(value: object) -> str | None:
+    """Single token from config (first word), matching main._normalize_feed_category."""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    return s.split()[0]
+
+
+def _resolved_feed_category(group: dict, cfg: dict) -> str | None:
+    return _normalize_feed_category(
+        group.get("feed_category")
+        or group.get("category")
+        or cfg.get("feed_category")
+        or cfg.get("category")
+    )
+
+
 def _normalize_cfg_snapshot(cfg: dict) -> dict[str, Any]:
     if cfg.get("groups"):
         return {
@@ -29,6 +47,7 @@ def _normalize_cfg_snapshot(cfg: dict) -> dict[str, Any]:
             "groups": [
                 {
                     "name": g.get("name", "unnamed"),
+                    "feed_category": _resolved_feed_category(g, cfg),
                     "urls": list(g.get("urls") or []),
                     "research_areas": list(g.get("research_areas") or []),
                     "excluded_areas": list(g.get("excluded_areas") or []),
@@ -38,15 +57,157 @@ def _normalize_cfg_snapshot(cfg: dict) -> dict[str, Any]:
         }
     return {
         "mode": "legacy",
+        "feed_category": _normalize_feed_category(
+            cfg.get("feed_category") or cfg.get("category")
+        ),
         "urls": list(cfg.get("urls") or []),
         "research_areas": list(cfg.get("research_areas") or []),
         "excluded_areas": list(cfg.get("excluded_areas") or []),
     }
 
 
-def _list_added_removed(before: list[str], after: list[str]) -> tuple[list[str], list[str]]:
-    b, a = set(before), set(after)
-    return sorted(a - b), sorted(b - a)
+def _bucket_id_title_for_group(g: dict, cfg: dict) -> tuple[str, str, str]:
+    """Return (bucket_id, markdown_title, heading_kind) with heading_kind \"category\" or \"group\"."""
+    fc = g.get("feed_category")
+    if fc is None:
+        fc = _resolved_feed_category(g, cfg)
+    name = str(g.get("name") or "unnamed")
+    if fc:
+        return f"c:{fc}", str(fc), "category"
+    return f"g:{name}", name, "group"
+
+
+def _aggregate_group_buckets(snapshot: dict) -> dict[str, dict[str, Any]]:
+    """bucket_id -> {title, kind, feed_urls set, keyword_lines int}."""
+    buckets: dict[str, dict[str, Any]] = {}
+    cfg = snapshot
+    for g in snapshot["groups"]:
+        bid, title, kind = _bucket_id_title_for_group(g, cfg)
+        urls = set(g.get("urls") or [])
+        ra = g.get("research_areas") or []
+        ea = g.get("excluded_areas") or []
+        kw = len(ra) + len(ea)
+        if bid not in buckets:
+            buckets[bid] = {"title": title, "kind": kind, "urls": set(), "kw": 0}
+        buckets[bid]["urls"].update(urls)
+        buckets[bid]["kw"] += kw
+    for b in buckets.values():
+        b["feeds"] = len(b["urls"])
+    return buckets
+
+
+def _format_delta(n: int) -> str:
+    if n == 0:
+        return "0"
+    sign = "+" if n > 0 else ""
+    return f"{sign}{n}"
+
+
+def _section_heading(kind: str, title: str) -> str:
+    if kind == "category":
+        return f"### Category `{title}`\n"
+    return f"### Group `{title}`\n"
+
+
+def _backfill_group_feed_categories(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Old weekly-summary state files lack per-group feed_category; align buckets with `after` by name."""
+    if before.get("mode") != "groups":
+        return before
+    out = copy.deepcopy(before)
+    ref_by = {str(g.get("name")): g for g in after.get("groups") or []}
+    for g in out["groups"]:
+        if g.get("feed_category") is None:
+            rg = ref_by.get(str(g.get("name")))
+            if rg is not None and rg.get("feed_category"):
+                g["feed_category"] = rg["feed_category"]
+    return out
+
+
+def _markdown_groups_compact(before: dict[str, Any], after: dict[str, Any]) -> str:
+    before = _backfill_group_feed_categories(before, after)
+    b_ag = _aggregate_group_buckets(before)
+    a_ag = _aggregate_group_buckets(after)
+    lines: list[str] = []
+    all_ids = sorted(set(b_ag) | set(a_ag), key=lambda bid: (0 if bid.startswith("c:") else 1, bid))
+    changed = False
+    for bid in all_ids:
+        b = b_ag.get(bid)
+        a = a_ag.get(bid)
+        if b is None and a is None:
+            continue
+        kind = (a or b)["kind"]
+        title = (a or b)["title"]
+        feeds_b = len(b["urls"]) if b else 0
+        feeds_a = len(a["urls"]) if a else 0
+        kw_b = b["kw"] if b else 0
+        kw_a = a["kw"] if a else 0
+        urls_b = frozenset(b["urls"]) if b else frozenset()
+        urls_a = frozenset(a["urls"]) if a else frozenset()
+        added_n = len(urls_a - urls_b)
+        removed_n = len(urls_b - urls_a)
+        d_feeds = feeds_a - feeds_b
+        d_kw = kw_a - kw_b
+        if (
+            d_feeds == 0
+            and d_kw == 0
+            and added_n == 0
+            and removed_n == 0
+            and b is not None
+            and a is not None
+        ):
+            continue
+        changed = True
+        lines.append(_section_heading(kind, title))
+        lines.append(f"- **Journal feeds:** {feeds_a} (Δ {_format_delta(d_feeds)} since last summary)\n")
+        lines.append(
+            f"- **Keywords** (research + excluded lines): {kw_a} "
+            f"(Δ {_format_delta(d_kw)} since last summary)\n"
+        )
+        if added_n or removed_n:
+            parts = []
+            if added_n:
+                parts.append(f"**{added_n}** RSS URL(s) added")
+            if removed_n:
+                parts.append(f"**{removed_n}** RSS URL(s) removed")
+            lines.append(f"- {'; '.join(parts)}\n")
+        lines.append("\n")
+    if not changed:
+        return ""
+    return "\n".join(lines).strip()
+
+
+def _markdown_legacy_compact(before: dict[str, Any], after: dict[str, Any]) -> str:
+    urls_b = set(before.get("urls") or [])
+    urls_a = set(after.get("urls") or [])
+    ra_b, ea_b = before.get("research_areas") or [], before.get("excluded_areas") or []
+    ra_a, ea_a = after.get("research_areas") or [], after.get("excluded_areas") or []
+    kw_b = len(ra_b) + len(ea_b)
+    kw_a = len(ra_a) + len(ea_a)
+    feeds_b, feeds_a = len(urls_b), len(urls_a)
+    d_feeds = feeds_a - feeds_b
+    d_kw = kw_a - kw_b
+    added_n = len(urls_a - urls_b)
+    removed_n = len(urls_b - urls_a)
+    if d_feeds == 0 and d_kw == 0 and added_n == 0 and removed_n == 0:
+        return ""
+    fc = after.get("feed_category") or before.get("feed_category")
+    if fc:
+        lines = [_section_heading("category", str(fc))]
+    else:
+        lines = ["### Legacy config (single block)\n"]
+    lines.append(f"- **Journal feeds:** {feeds_a} (Δ {_format_delta(d_feeds)} since last summary)\n")
+    lines.append(
+        f"- **Keywords** (research + excluded lines): {kw_a} "
+        f"(Δ {_format_delta(d_kw)} since last summary)\n"
+    )
+    if added_n or removed_n:
+        parts = []
+        if added_n:
+            parts.append(f"**{added_n}** RSS URL(s) added")
+        if removed_n:
+            parts.append(f"**{removed_n}** RSS URL(s) removed")
+        lines.append(f"- {'; '.join(parts)}\n")
+    return "".join(lines).strip()
 
 
 def markdown_config_diff(before: dict[str, Any] | None, after: dict[str, Any]) -> str:
@@ -59,58 +220,10 @@ def markdown_config_diff(before: dict[str, Any] | None, after: dict[str, Any]) -
             "Review `config.toml` manually.\n"
         )
 
-    lines: list[str] = []
     if after["mode"] == "legacy":
-        for label, key in (
-            ("Feed URLs", "urls"),
-            ("research_areas", "research_areas"),
-            ("excluded_areas", "excluded_areas"),
-        ):
-            added, removed = _list_added_removed(
-                list(before.get(key) or []),
-                list(after.get(key) or []),
-            )
-            if added:
-                lines.append(f"- **{label} — added:**\n" + "\n".join(f"  - `{x}`" for x in added))
-            if removed:
-                lines.append(f"- **{label} — removed:**\n" + "\n".join(f"  - `{x}`" for x in removed))
-        return "\n".join(lines).strip()
+        return _markdown_legacy_compact(before, after)
 
-    before_by = {g["name"]: g for g in before["groups"]}
-    after_by = {g["name"]: g for g in after["groups"]}
-    names = sorted(set(before_by) | set(after_by))
-    for name in names:
-        b = before_by.get(name)
-        a = after_by.get(name)
-        if b is None:
-            lines.append(f"### Group `{name}`\n- **New group** in config.\n")
-            continue
-        if a is None:
-            lines.append(f"### Group `{name}`\n- **Group removed** from config.\n")
-            continue
-        sub: list[str] = []
-        for label, key in (
-            ("Feed URLs", "urls"),
-            ("research_areas", "research_areas"),
-            ("excluded_areas", "excluded_areas"),
-        ):
-            added, removed = _list_added_removed(
-                list(b.get(key) or []),
-                list(a.get(key) or []),
-            )
-            if added:
-                sub.append(
-                    f"- **{label} — added:**\n"
-                    + "\n".join(f"  - {json.dumps(x, ensure_ascii=False)}" for x in added)
-                )
-            if removed:
-                sub.append(
-                    f"- **{label} — removed:**\n"
-                    + "\n".join(f"  - {json.dumps(x, ensure_ascii=False)}" for x in removed)
-                )
-        if sub:
-            lines.append(f"### Group `{name}`\n" + "\n".join(sub) + "\n")
-    return "\n".join(lines).strip()
+    return _markdown_groups_compact(before, after)
 
 
 def _load_state(path: Path) -> dict[str, Any]:

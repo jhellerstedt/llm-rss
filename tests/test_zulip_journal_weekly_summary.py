@@ -10,6 +10,7 @@ class TestMarkdownConfigDiff(unittest.TestCase):
             "groups": [
                 {
                     "name": "g1",
+                    "feed_category": "cm",
                     "urls": ["https://a/rss"],
                     "research_areas": ["old topic"],
                     "excluded_areas": ["x"],
@@ -21,6 +22,7 @@ class TestMarkdownConfigDiff(unittest.TestCase):
             "groups": [
                 {
                     "name": "g1",
+                    "feed_category": "cm",
                     "urls": ["https://a/rss", "https://b/rss"],
                     "research_areas": ["new topic"],
                     "excluded_areas": [],
@@ -28,24 +30,34 @@ class TestMarkdownConfigDiff(unittest.TestCase):
             ],
         }
         md = markdown_config_diff(before, after)
-        self.assertIn("g1", md)
-        self.assertIn("https://b/rss", md)
-        self.assertIn("new topic", md)
-        self.assertIn("old topic", md)
-        self.assertIn("x", md)
+        self.assertIn("Category `cm`", md)
+        self.assertIn("Journal feeds:** 2", md)
+        self.assertIn("Δ +1", md)
+        self.assertIn("Keywords", md)
+        self.assertIn("Δ -1", md)
+        self.assertIn("**1** RSS URL(s) added", md)
+        self.assertNotIn("https://b/rss", md)
+        self.assertNotIn("new topic", md)
+        self.assertNotIn("old topic", md)
 
     def test_new_group(self) -> None:
-        before = {"mode": "groups", "groups": [{"name": "a", "urls": [], "research_areas": [], "excluded_areas": []}]}
+        before = {
+            "mode": "groups",
+            "groups": [
+                {"name": "a", "feed_category": None, "urls": [], "research_areas": [], "excluded_areas": []}
+            ],
+        }
         after = {
             "mode": "groups",
             "groups": [
-                {"name": "a", "urls": [], "research_areas": [], "excluded_areas": []},
-                {"name": "b", "urls": ["u"], "research_areas": [], "excluded_areas": []},
+                {"name": "a", "feed_category": None, "urls": [], "research_areas": [], "excluded_areas": []},
+                {"name": "b", "feed_category": None, "urls": ["u"], "research_areas": [], "excluded_areas": []},
             ],
         }
         md = markdown_config_diff(before, after)
-        self.assertIn("New group", md)
-        self.assertIn("`b`", md)
+        self.assertIn("Group `b`", md)
+        self.assertIn("Journal feeds:** 1", md)
+        self.assertIn("**1** RSS URL(s) added", md)
 
     def test_legacy_mode(self) -> None:
         before = {
@@ -61,8 +73,54 @@ class TestMarkdownConfigDiff(unittest.TestCase):
             "excluded_areas": ["e"],
         }
         md = markdown_config_diff(before, after)
-        self.assertIn("b", md)
-        self.assertIn("e", md)
+        self.assertIn("Legacy config", md)
+        self.assertIn("**1** RSS URL(s) added", md)
+        self.assertIn("Keywords", md)
+        self.assertIn("Δ +1", md)
+
+    def test_same_category_merges_feed_counts(self) -> None:
+        before = {
+            "mode": "groups",
+            "groups": [
+                {
+                    "name": "g1",
+                    "feed_category": "cm",
+                    "urls": ["https://shared/rss"],
+                    "research_areas": ["a"],
+                    "excluded_areas": [],
+                },
+                {
+                    "name": "g2",
+                    "feed_category": "cm",
+                    "urls": ["https://other/rss"],
+                    "research_areas": [],
+                    "excluded_areas": ["b"],
+                },
+            ],
+        }
+        after = {
+            "mode": "groups",
+            "groups": [
+                {
+                    "name": "g1",
+                    "feed_category": "cm",
+                    "urls": ["https://shared/rss"],
+                    "research_areas": ["a"],
+                    "excluded_areas": [],
+                },
+                {
+                    "name": "g2",
+                    "feed_category": "cm",
+                    "urls": ["https://other/rss", "https://new/rss"],
+                    "research_areas": [],
+                    "excluded_areas": ["b"],
+                },
+            ],
+        }
+        md = markdown_config_diff(before, after)
+        self.assertIn("Category `cm`", md)
+        self.assertIn("Journal feeds:** 3", md)
+        self.assertIn("**1** RSS URL(s) added", md)
 
 
 if __name__ == "__main__":
