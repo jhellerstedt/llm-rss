@@ -24,15 +24,23 @@ enabled = true
 kagi_fallback = true
 # mailto = "you@example.com"
 
+# Channel <link> value used in RSS XML output (per-group override supported via groups[].feed_link).
+feed_link = "jhell.imipolex.biz/feeds"
+
 # Zulip realms: JSON map realm_name -> { email, api_key, site }
 # Or set ZULIP_REALMS_CONFIG_FILE / ZULIP_REALM_<NAME>_EMAIL, etc. (see README)
 [zulip]
 # realms_config_file = "zulip_realms.json"
 context_max_chars = 12000
+# When groups use zulip_sources, post a weekly digest of config.toml edits to topic "journal suggestions".
+# journal_weekly_summary = false
 
 # Topical group 1: condensed matter / general physics journals
 [[groups]]
 name = "cm_physics"
+# Optional: single token appended to RSS channel <description> as "— category: …" for site grouping.
+# Alias key: `category` (same meaning).
+feed_category = "cm"
 urls = [
     "https://www.nature.com/ncomms.rss",
     "https://www.nature.com/nphys.rss",
@@ -68,6 +76,7 @@ impact_threshold = 3
 # Topical group 2: preprints example
 [[groups]]
 name = "plasma_preprints"
+feed_category = "plasma"
 urls = [
     "http://rss.arxiv.org/rss/physics.plasm-ph",
 ]

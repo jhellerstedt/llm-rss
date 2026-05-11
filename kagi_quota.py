@@ -11,7 +11,7 @@ _kagi_invocations_used: int = 0
 # Subset of fastgpt_query calls from OpenAlex metadata backfill only.
 _openalex_fallback_fastgpt_used: int = 0
 
-MAX_KAGI_INVOCATIONS_PER_RUN: int = 70
+MAX_KAGI_INVOCATIONS_PER_RUN: int = 120
 MAX_OPENALEX_FALLBACK_FASTGPT_PER_RUN: int = 20
 # Worst-case slots to leave for post-scoring Kagi (OpenAlex metadata + margin).
 DEFAULT_RESERVE_AFTER_SCORING: int = 7

@@ -1,18 +1,30 @@
 """Suggest missing journal domains based on Zulip-linked articles."""
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from typing import Any
 
-from api_usage import record_zulip_api
 from fastgpt_reply import try_load_json_object_from_llm
-from zulip_context import _client_for_realm, domain_from_url, extract_urls_from_zulip_message_content
-from zulip_feedback import unique_realm_stream_pairs
+from journal_venue import (
+    VenueBucket,
+    bucket_from_ref,
+    merge_bucket,
+    venue_fallback_host,
+    venue_from_article_url,
+)
+from zulip_context import (
+    ZULIP_SECTION_META_KEY,
+    domain_from_url,
+    extract_urls_from_zulip_message_content,
+)
 
 logger = logging.getLogger(__name__)
 
-JOURNAL_SUGGESTIONS_TOPIC = "journal suggestions"
+UNKNOWN_ZULIP_SECTION = "(unknown section)"
+
+# Max venues listed per Zulip section before collapsing the rest.
+MAX_VENUES_PER_SECTION = 15
 
 # Not journals; common link routers / social / aggregators.
 DEFAULT_DOMAIN_DENYLIST: set[str] = {
@@ -61,6 +73,87 @@ def missing_domain_counts(
     zulip_domain_counts: dict[str, int],
 ) -> dict[str, int]:
     return {d: c for d, c in zulip_domain_counts.items() if d not in tracked_domains}
+
+
+def missing_venues_by_section_from_messages(
+    messages: list[dict[str, Any]],
+    *,
+    tracked_venue_keys: set[str],
+    denylist: set[str] | None = None,
+) -> dict[str, dict[str, VenueBucket]]:
+    """Count untracked venues per Zulip context section (`realm/stream[/topic]`)."""
+    deny = denylist or set()
+    out: dict[str, dict[str, VenueBucket]] = {}
+    for msg in messages:
+        section = str(msg.get(ZULIP_SECTION_META_KEY) or "").strip() or UNKNOWN_ZULIP_SECTION
+        raw_html = str(msg.get("content") or "")
+        for url in extract_urls_from_zulip_message_content(raw_html):
+            domain = domain_from_url(url)
+            if not domain or domain in deny:
+                continue
+            ref = venue_from_article_url(url)
+            if ref is None:
+                ref = venue_fallback_host(url, domain)
+            if ref.venue_key in tracked_venue_keys:
+                continue
+            sec_map = out.setdefault(section, {})
+            if ref.venue_key not in sec_map:
+                sec_map[ref.venue_key] = bucket_from_ref(ref, url)
+            b = sec_map[ref.venue_key]
+            b.count += 1
+            if not b.example_url:
+                b.example_url = url
+    return out
+
+
+def merge_journal_suggestion_maps(
+    dest: dict[str, dict[str, VenueBucket]],
+    src: dict[str, dict[str, VenueBucket]],
+) -> None:
+    """Merge venue counts from `src` into `dest` (same section / venue_key sums)."""
+    for section, vmap in src.items():
+        dsec = dest.setdefault(section, {})
+        for vk, b in vmap.items():
+            if vk not in dsec:
+                dsec[vk] = VenueBucket(
+                    count=b.count,
+                    display_name=b.display_name,
+                    suggested_rss=b.suggested_rss,
+                    journal_page_url=b.journal_page_url,
+                    apex_domain=b.apex_domain,
+                    example_url=b.example_url,
+                )
+            else:
+                merge_bucket(dsec[vk], b)
+
+
+def apex_domains_from_nested(by_section: dict[str, dict[str, VenueBucket]]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for vmap in by_section.values():
+        for b in vmap.values():
+            d = (b.apex_domain or "").strip().lower().removeprefix("www.")
+            if d and d not in seen:
+                seen.add(d)
+                out.append(d)
+    return sorted(out)
+
+
+def filter_nested_by_allowed_domains(
+    by_section: dict[str, dict[str, VenueBucket]],
+    allowed_domains: set[str],
+) -> dict[str, dict[str, VenueBucket]]:
+    allowed = {x.strip().lower().removeprefix("www.") for x in allowed_domains if x.strip()}
+    out: dict[str, dict[str, VenueBucket]] = {}
+    for sec, vmap in by_section.items():
+        kept = {
+            vk: b
+            for vk, b in vmap.items()
+            if (b.apex_domain or "").strip().lower().removeprefix("www.") in allowed
+        }
+        if kept:
+            out[sec] = kept
+    return out
 
 
 def _parse_kagi_journal_domain_filter_response(text: str) -> tuple[set[str], dict[str, str]]:
@@ -133,6 +226,7 @@ def filter_academic_journal_domains_with_kagi(
 
 
 def format_missing_journals_message(missing: dict[str, int]) -> str:
+    """Legacy flat formatter (domain -> count). Prefer `format_missing_journals_message_nested`."""
     lines = [
         "Untracked journals/sources mentioned in Zulip recently (domain-based):",
         "",
@@ -144,56 +238,125 @@ def format_missing_journals_message(missing: dict[str, int]) -> str:
     return "\n".join(lines).strip()
 
 
-def post_missing_journals_suggestions(
+def format_missing_journals_message_nested(
+    by_section: dict[str, dict[str, VenueBucket]],
     *,
-    zulip_sources: list[dict[str, Any]],
-    zulip_realms: dict[str, dict[str, str]],
-    message: str,
-    dryrun: bool,
-    topic: str = JOURNAL_SUGGESTIONS_TOPIC,
-) -> None:
-    if not zulip_sources or not zulip_realms:
-        return
-    if not message.strip():
-        return
+    max_per_section: int = MAX_VENUES_PER_SECTION,
+) -> str:
+    """Markdown grouped by Zulip context section with venue-level RSS hints."""
+    lines = [
+        "Untracked journals/sources mentioned in Zulip recently (by venue and Zulip section):",
+        "",
+    ]
+    for section in sorted(by_section.keys()):
+        vmap = by_section[section]
+        lines.append(f"### {section}")
+        ranked = sorted(vmap.items(), key=lambda kv: (-kv[1].count, kv[1].display_name))
+        shown = ranked[:max_per_section]
+        hidden_n = len(ranked) - len(shown)
+        for _vk, b in shown:
+            tail: list[str] = []
+            if b.suggested_rss:
+                tail.append(f"add `{b.suggested_rss}`")
+            elif b.journal_page_url:
+                tail.append(f"journal page: {b.journal_page_url}")
+            extra = f" — {' — '.join(tail)}" if tail else ""
+            lines.append(f"- **{b.display_name}** — links: {b.count}{extra}")
+        if hidden_n > 0:
+            lines.append(f"- _… and {hidden_n} more venue(s) in this section._")
+        lines.append("")
 
-    for realm, stream in unique_realm_stream_pairs(zulip_sources):
-        try:
-            client = _client_for_realm(zulip_realms, realm)
-        except Exception:
-            logger.exception("Zulip client init failed realm=%s stream=%s", realm, stream)
-            continue
+    lines.append(
+        "Suggestion: add these **feed URLs** to the matching `[[groups]]` entry under `urls = [...]` "
+        "(or subscribe via another feed if the publisher does not expose RSS)."
+    )
+    return "\n".join(lines).strip()
 
-        if dryrun:
-            logger.info(
-                "[dry run] would post journal suggestions realm=%s stream=%s",
-                realm,
-                stream,
-            )
-            continue
 
-        try:
-            result = client.send_message(
-                {
-                    "type": "stream",
-                    "to": stream,
-                    "topic": topic,
-                    "content": message,
-                }
-            )
-            if result.get("result") != "success":
-                logger.warning(
-                    "Zulip send_message failed (journal suggestions) realm=%s stream=%s: %s",
-                    realm,
-                    stream,
-                    result,
-                )
+def new_feed_urls_from_filtered_nested(
+    filtered_nested: dict[str, dict[str, VenueBucket]],
+    existing_urls: list[str] | set[str],
+) -> list[str]:
+    """Return suggested_rss URLs from nested venues, newest-by-link-count first, skipping existing."""
+    existing = {str(u).strip() for u in existing_urls}
+    ranked: list[tuple[int, str]] = []
+    for vmap in filtered_nested.values():
+        for b in vmap.values():
+            rss = (b.suggested_rss or "").strip()
+            if not rss:
                 continue
-            record_zulip_api(1)
-        except Exception:
-            logger.exception(
-                "Zulip post journal suggestions failed realm=%s stream=%s",
-                realm,
-                stream,
-            )
+            ranked.append((-b.count, rss))
+    ranked.sort(key=lambda t: (t[0], t[1]))
+    out: list[str] = []
+    seen: set[str] = set()
+    for _neg_count, rss in ranked:
+        if rss in existing or rss in seen:
+            continue
+        seen.add(rss)
+        out.append(rss)
+    return out
+
+
+def _parse_group_area_curation_response(text: str) -> tuple[list[str], list[str]] | None:
+    obj = try_load_json_object_from_llm(text or "")
+    if not isinstance(obj, dict):
+        return None
+    ra = obj.get("research_areas")
+    ex = obj.get("excluded_areas")
+    if not isinstance(ra, list):
+        return None
+    if ex is None:
+        ex = []
+    if not isinstance(ex, list):
+        return None
+    research = [str(x).strip() for x in ra if str(x).strip()]
+    excluded = [str(x).strip() for x in ex if str(x).strip()]
+    if not research:
+        return None
+    return research, excluded
+
+
+def curate_group_research_lists_with_kagi(
+    kagi,
+    *,
+    group_name: str,
+    research_areas: list[str],
+    excluded_areas: list[str],
+    journals_markdown: str,
+    zulip_excerpt: str,
+) -> tuple[list[str], list[str]] | None:
+    """Ask FastGPT to revise research_areas and excluded_areas from Zulip + journal signals."""
+    ra = json.dumps(research_areas)
+    ex = json.dumps(excluded_areas)
+    zex = (zulip_excerpt or "").strip()
+    if len(zex) > 18_000:
+        zex = zex[:18_000] + "\n\n[truncated]"
+    prompt = (
+        "You maintain `research_areas` and `excluded_areas` strings for an academic RSS feed group.\n"
+        "The team discusses papers on Zulip; below is an excerpt of that discussion, plus a summary of "
+        "journal links they shared that are not yet on the group's feed list.\n\n"
+        f"Group name: {group_name}\n\n"
+        f"Current research_areas (JSON array): {ra}\n"
+        f"Current excluded_areas (JSON array): {ex}\n\n"
+        "### Journals mentioned (from chat; may include suggested RSS lines)\n"
+        f"{journals_markdown.strip()}\n\n"
+        "### Zulip discussion excerpt\n"
+        f"{zex if zex else '(none)'}\n\n"
+        "Return ONLY a single JSON object with exactly these keys:\n"
+        '- "research_areas": array of strings (specific topics this group should emphasize when scoring; '
+        "at least one item)\n"
+        '- "excluded_areas": array of strings (topics to generally deprioritize; may be empty)\n'
+    )
+    text = kagi.fastgpt_query(prompt)
+    if not (text or "").strip():
+        logger.warning("Kagi group-area curation returned empty output (group=%s)", group_name)
+        return None
+    parsed = _parse_group_area_curation_response(text)
+    if parsed is None:
+        logger.warning(
+            "Kagi group-area curation parse failed (group=%s); snippet=%s",
+            group_name,
+            (text or "")[:400],
+        )
+    return parsed
 

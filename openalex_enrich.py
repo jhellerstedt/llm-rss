@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
 
 import requests
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from adapter import ArticleInfo
 from api_usage import record_openalex_http
@@ -21,6 +21,10 @@ if TYPE_CHECKING:
     from kagi_client import KagiClient
 
 logger = logging.getLogger(__name__)
+
+# Individual h-index above this is not credible (models often substitute citation
+# totals, i10-index, or other counts). Real-world scholar h-indices stay far below.
+_MAX_PLAUSIBLE_AUTHOR_H_INDEX = 400
 
 OPENALEX_BASE = "https://api.openalex.org"
 _HTTP_HEADERS = {"User-Agent": "llm-rss/openalex-enrich"}
@@ -49,12 +53,15 @@ class PaperEnrichment:
     top_h_index: int
     first_affiliation: str
     last_affiliation: str
+    top_author_affiliation: str = "Unknown"
 
     def format_block(self) -> str:
         lines = [
             f"Highest h-index author on this paper: {self.top_author_name} "
             f"(h-index {self.top_h_index})",
         ]
+        if not _is_unknown(self.top_author_affiliation):
+            lines.append(f"That author's affiliation: {self.top_author_affiliation}")
         if self.first_affiliation == self.last_affiliation:
             lines.append(
                 f"Institution (first & last author): {self.first_affiliation}"
@@ -68,6 +75,26 @@ class PaperEnrichment:
 def _is_unknown(s: str) -> bool:
     t = str(s).strip()
     return not t or t.lower() == "unknown"
+
+
+def _norm_person_name(name: str) -> str:
+    """Lowercase + collapsed whitespace for comparing author strings across sources."""
+    t = str(name).strip().lower()
+    return re.sub(r"\s+", " ", t)
+
+
+def _plausible_author_h_index(h: int) -> int:
+    """Drop obviously wrong h-index values (LLM / source confusion with citations)."""
+    if h <= 0:
+        return 0
+    if h > _MAX_PLAUSIBLE_AUTHOR_H_INDEX:
+        logger.warning(
+            "Ignoring implausible author h-index %d (cap %d)",
+            h,
+            _MAX_PLAUSIBLE_AUTHOR_H_INDEX,
+        )
+        return 0
+    return h
 
 
 def paper_enrichment_incomplete(en: PaperEnrichment | None) -> bool:
@@ -87,6 +114,8 @@ def paper_enrichment_has_any_signal(en: PaperEnrichment | None) -> bool:
     if not _is_unknown(en.top_author_name):
         return True
     if en.top_h_index > 0:
+        return True
+    if not _is_unknown(en.top_author_affiliation):
         return True
     if not _is_unknown(en.first_affiliation):
         return True
@@ -110,6 +139,16 @@ def merge_paper_enrichment(
     else:
         top_name = openalex.top_author_name
         top_h = openalex.top_h_index
+        # OpenAlex often has the right author but h-index 0 (new profile / missing
+        # stats). Kagi may have a verifiable h-index for the same person; only merge
+        # h when names agree so we do not attach a senior co-author's h to someone else.
+        if (
+            top_h == 0
+            and kagi.top_h_index > 0
+            and not _is_unknown(kagi.top_author_name)
+            and _norm_person_name(top_name) == _norm_person_name(kagi.top_author_name)
+        ):
+            top_h = kagi.top_h_index
     first = (
         openalex.first_affiliation
         if not _is_unknown(openalex.first_affiliation)
@@ -120,11 +159,17 @@ def merge_paper_enrichment(
         if not _is_unknown(openalex.last_affiliation)
         else kagi.last_affiliation
     )
+    top_aff = (
+        openalex.top_author_affiliation
+        if not _is_unknown(openalex.top_author_affiliation)
+        else kagi.top_author_affiliation
+    )
     return PaperEnrichment(
         top_author_name=top_name,
         top_h_index=top_h,
         first_affiliation=first,
         last_affiliation=last,
+        top_author_affiliation=top_aff,
     )
 
 
@@ -134,62 +179,163 @@ def format_enrichment_for_feed(en: PaperEnrichment | None) -> str:
     return en.format_block()
 
 
+def format_enrichment_for_feedback_zulip(en: PaperEnrichment | None) -> str:
+    """Short lines for Zulip feedback ranking (h-index author + affiliation when known)."""
+    if en is None or not paper_enrichment_has_any_signal(en):
+        return ""
+    lines: list[str] = []
+    if not _is_unknown(en.top_author_name) or en.top_h_index > 0:
+        name = en.top_author_name if not _is_unknown(en.top_author_name) else "Unknown"
+        lines.append(f"Highest h-index author: {name} (h-index {en.top_h_index})")
+    if not _is_unknown(en.top_author_affiliation):
+        lines.append(f"That author's affiliation: {en.top_author_affiliation}")
+    return "\n".join(lines).strip()
+
+
 class _KagiMetadataJson(BaseModel):
     top_author_name: str = Field(default="Unknown")
     top_author_h_index: int = Field(default=0, ge=0)
+    top_author_institution: str = Field(default="Unknown")
     first_author_institution: str = Field(default="Unknown")
     last_author_institution: str = Field(default="Unknown")
 
+    @field_validator("top_author_h_index", mode="after")
+    @classmethod
+    def _cap_h_index(cls, v: int) -> int:
+        return _plausible_author_h_index(v)
 
-def fetch_metadata_via_kagi(kagi: KagiClient, article: ArticleInfo) -> PaperEnrichment | None:
-    authors_line = (article.authors or "").strip() or "(not provided)"
-    query = f"""You are extracting bibliometric metadata for an academic paper. Use web search if it helps.
 
-Paper title: {article.title}
-Link: {article.link}
-Abstract: {article.abstract}
-RSS author line (may be incomplete): {authors_line}
+class _KagiBatchPaperItem(BaseModel):
+    """One row in a batched FastGPT metadata response."""
 
-Respond with ONLY a single JSON object (no markdown code fences, no other text) with exactly these keys:
-"top_author_name" (string: full name of the listed author on this paper with the highest h-index you can verify; "Unknown" if unclear),
-"top_author_h_index" (integer >= 0; use 0 only if the name is Unknown or h-index cannot be found),
-"first_author_institution" (string: primary institution or affiliation of the first author; "Unknown" if unclear),
-"last_author_institution" (string: primary institution of the last/senior author; "Unknown" if unclear).
+    paper_id: str = Field(..., min_length=1)
+    top_author_name: str = Field(default="Unknown")
+    top_author_h_index: int = Field(default=0, ge=0)
+    top_author_institution: str = Field(default="Unknown")
+    first_author_institution: str = Field(default="Unknown")
+    last_author_institution: str = Field(default="Unknown")
 
-If there is only one author, repeat the same institution in both institution fields.
-Example: {{"top_author_name": "...", "top_author_h_index": 12, "first_author_institution": "...", "last_author_institution": "..."}}
-"""
-    try:
-        raw = kagi.fastgpt_query(query, openalex_fallback=True)
-    except Exception as e:
-        if isinstance(e, (KagiOpenAlexFallbackQuotaExceeded, KagiSessionQuotaExceeded)):
-            logger.info(
-                "Skipping Kagi metadata for %r: %s",
-                article.title[:60],
-                e,
-            )
-            return None
-        logger.warning("Kagi metadata query failed for %r: %s", article.title[:60], e)
-        return None
-    data = try_load_json_object_from_llm(raw)
-    if not data:
-        logger.warning(
-            "Kagi metadata JSON parse failed for %r; snippet=%s",
-            article.title[:60],
-            raw[:400],
-        )
-        return None
-    try:
-        m = _KagiMetadataJson.model_validate(data)
-    except ValidationError as e:
-        logger.warning("Kagi metadata validation failed for %r: %s", article.title[:60], e)
-        return None
+    @field_validator("top_author_h_index", mode="after")
+    @classmethod
+    def _cap_h_index(cls, v: int) -> int:
+        return _plausible_author_h_index(v)
+
+
+# OpenAlex gaps are filled in chunked Kagi calls (one FastGPT invocation per chunk).
+METADATA_KAGI_BATCH_MAX = 12
+_METADATA_ABSTRACT_CHARS_PER_PAPER = 1800
+
+
+def _enrichment_from_kagi_metadata_json(m: _KagiMetadataJson) -> PaperEnrichment:
     return PaperEnrichment(
         top_author_name=m.top_author_name.strip() or "Unknown",
         top_h_index=int(m.top_author_h_index),
         first_affiliation=m.first_author_institution.strip() or "Unknown",
         last_affiliation=m.last_author_institution.strip() or "Unknown",
+        top_author_affiliation=m.top_author_institution.strip() or "Unknown",
     )
+
+
+def _paper_block_for_kagi_batch(art: ArticleInfo) -> str:
+    authors_line = (art.authors or "").strip() or "(not provided)"
+    pid = str(art.link)
+    abst = (art.abstract or "").strip()
+    if len(abst) > _METADATA_ABSTRACT_CHARS_PER_PAPER:
+        abst = abst[:_METADATA_ABSTRACT_CHARS_PER_PAPER] + "\n[truncated]"
+    return (
+        f"paper_id: {pid}\n"
+        f"Title: {art.title}\n"
+        f"Link: {art.link}\n"
+        f"Abstract:\n{abst}\n"
+        f"RSS author line (may be incomplete): {authors_line}\n"
+    )
+
+
+def fetch_metadata_batch_via_kagi(
+    kagi: KagiClient, articles: list[ArticleInfo]
+) -> dict[str, PaperEnrichment]:
+    """One FastGPT call for many papers; map link -> enrichment (omits failures)."""
+    if not articles:
+        return {}
+    expected = {str(a.link) for a in articles}
+    blocks = [_paper_block_for_kagi_batch(a) for a in articles]
+    joined = "\n---\n".join(blocks)
+    n = len(articles)
+    prompt = f"""You are extracting bibliometric metadata for {n} academic paper(s). Use web search if it helps.
+
+Each paper below is separated by ---. The line paper_id identifies that paper; you MUST echo the same paper_id string in your JSON output for that paper.
+
+{joined}
+
+Respond with ONLY a single JSON object (no markdown code fences, no other text) with exactly one key:
+"papers": array of {n} object(s) — one per paper above, in any order. Each object must have:
+- "paper_id": string (exactly one of the paper_id values from above)
+- "top_author_name": string (full name of the listed author with highest verifiable h-index; "Unknown" if unclear)
+- "top_author_h_index": integer >= 0 (0 if name is Unknown or h-index unknown). This must be the bibliometric **h-index** (Hirsch index: h papers with at least h citations each), NOT total citations, NOT i10-index, NOT publication count. Typical values are under 150 even for very prominent researchers.
+- "top_author_institution": string
+- "first_author_institution": string
+- "last_author_institution": string
+
+If a paper has only one author, repeat the same institution in first and last author fields when appropriate. Apply rules independently per paper.
+"""
+    try:
+        raw = kagi.fastgpt_query(prompt, openalex_fallback=True)
+    except Exception as e:
+        if isinstance(e, (KagiOpenAlexFallbackQuotaExceeded, KagiSessionQuotaExceeded)):
+            logger.info(
+                "Skipping Kagi metadata batch for %d paper(s): %s",
+                n,
+                e,
+            )
+            return {}
+        logger.warning("Kagi metadata batch query failed (%d papers): %s", n, e)
+        return {}
+    data = try_load_json_object_from_llm(raw or "")
+    if not data:
+        logger.warning(
+            "Kagi metadata batch JSON parse failed (%d papers); snippet=%s",
+            n,
+            (raw or "")[:500],
+        )
+        return {}
+    papers_raw = data.get("papers")
+    if papers_raw is None and isinstance(data, list):
+        papers_raw = data
+    if not isinstance(papers_raw, list):
+        logger.warning(
+            "Kagi metadata batch: expected papers array (%d papers); snippet=%s",
+            n,
+            (raw or "")[:400],
+        )
+        return {}
+    out: dict[str, PaperEnrichment] = {}
+    for i, item in enumerate(papers_raw):
+        if not isinstance(item, dict):
+            continue
+        try:
+            row = _KagiBatchPaperItem.model_validate(item)
+        except ValidationError as e:
+            logger.warning("Kagi metadata batch row %d invalid: %s", i, e)
+            continue
+        pid = str(row.paper_id).strip()
+        if pid not in expected:
+            logger.debug("Kagi metadata batch: unexpected paper_id %r", pid[:120])
+            continue
+        meta = _KagiMetadataJson(
+            top_author_name=row.top_author_name,
+            top_author_h_index=row.top_author_h_index,
+            top_author_institution=row.top_author_institution,
+            first_author_institution=row.first_author_institution,
+            last_author_institution=row.last_author_institution,
+        )
+        out[pid] = _enrichment_from_kagi_metadata_json(meta)
+    return out
+
+
+def fetch_metadata_via_kagi(kagi: KagiClient, article: ArticleInfo) -> PaperEnrichment | None:
+    """Single-paper convenience wrapper (one batched FastGPT call)."""
+    got = fetch_metadata_batch_via_kagi(kagi, [article])
+    return got.get(str(article.link))
 
 
 def apply_kagi_metadata_backfill(
@@ -197,14 +343,24 @@ def apply_kagi_metadata_backfill(
     articles: list[ArticleInfo],
     kagi: KagiClient,
 ) -> None:
-    """Mutates by_link: runs Kagi when enrichment is incomplete."""
+    """Mutates by_link: runs Kagi when enrichment is incomplete (batched FastGPT calls)."""
+    need: list[ArticleInfo] = []
     for art in articles:
         link = str(art.link)
         cur = by_link.get(link)
-        if not paper_enrichment_incomplete(cur):
-            continue
-        kg = fetch_metadata_via_kagi(kagi, art)
-        by_link[link] = merge_paper_enrichment(cur, kg)
+        if paper_enrichment_incomplete(cur):
+            need.append(art)
+    if not need:
+        return
+    batch_size = max(1, int(METADATA_KAGI_BATCH_MAX))
+    for i in range(0, len(need), batch_size):
+        batch = need[i : i + batch_size]
+        got = fetch_metadata_batch_via_kagi(kagi, batch)
+        for art in batch:
+            link = str(art.link)
+            cur = by_link.get(link)
+            kg = got.get(link)
+            by_link[link] = merge_paper_enrichment(cur, kg)
 
 
 def _norm_title(t: str) -> str:
@@ -332,7 +488,8 @@ def fetch_author_metric(author_openalex_id_url: str, mailto: str) -> AuthorMetri
         h = int(stats.get("h_index") or 0)
     except (TypeError, ValueError):
         h = 0
-    return AuthorMetric(display_name=name or "Unknown", h_index=max(0, h))
+    h = _plausible_author_h_index(max(0, h))
+    return AuthorMetric(display_name=name or "Unknown", h_index=h)
 
 
 def affiliation_for_authorship(a: dict[str, Any]) -> str:
@@ -405,11 +562,16 @@ def build_enrichment_for_work(
     first_aff = affiliation_for_authorship(first_a) if first_a else "Unknown"
     last_aff = affiliation_for_authorship(last_a) if last_a else "Unknown"
 
+    top_aff = "Unknown"
+    if best_idx is not None and 0 <= best_idx < len(authorships):
+        top_aff = affiliation_for_authorship(authorships[best_idx])
+
     return PaperEnrichment(
         top_author_name=top_name,
         top_h_index=top_h,
         first_affiliation=first_aff,
         last_affiliation=last_aff,
+        top_author_affiliation=top_aff,
     )
 
 

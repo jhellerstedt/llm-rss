@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from openalex_enrich import (
     AuthorMetric,
     PaperEnrichment,
+    _KagiBatchPaperItem,
     apply_kagi_metadata_backfill,
     batch_enrich_articles,
     build_enrichment_for_work,
@@ -16,6 +17,7 @@ from openalex_enrich import (
     merge_paper_enrichment,
     paper_enrichment_incomplete,
     direct_openalex_work_urls,
+    fetch_author_metric,
 )
 
 
@@ -78,7 +80,7 @@ class TestBuildEnrichment(unittest.TestCase):
                     "author": {"id": "https://openalex.org/A3"},
                     "institutions": [{"display_name": "Stanford University"}],
                 },
-            ]
+            ],
         }
         metrics = {
             "https://openalex.org/A1": AuthorMetric("Alice", 10),
@@ -89,6 +91,7 @@ class TestBuildEnrichment(unittest.TestCase):
         assert en is not None
         self.assertEqual(en.top_author_name, "Bob")
         self.assertEqual(en.top_h_index, 40)
+        self.assertEqual(en.top_author_affiliation, "Somewhere Institute")
         self.assertEqual(en.first_affiliation, "MIT")
         self.assertEqual(en.last_affiliation, "Stanford University")
 
@@ -137,16 +140,93 @@ class TestBatchEnrichMocked(unittest.TestCase):
         self.assertIn("Solo", block)
 
 
+class TestPlausibleHIndex(unittest.TestCase):
+    def test_kagi_batch_clamps_citation_mislabeled_as_h_index(self) -> None:
+        row = _KagiBatchPaperItem.model_validate(
+            {
+                "paper_id": "https://example.com/p",
+                "top_author_name": "A",
+                "top_author_h_index": 3136,
+                "top_author_institution": "U",
+                "first_author_institution": "U",
+                "last_author_institution": "U",
+            }
+        )
+        self.assertEqual(row.top_author_h_index, 0)
+
+    @patch("openalex_enrich._get_json")
+    def test_openalex_author_clamps_absurd_h(self, mock_get: unittest.mock.MagicMock) -> None:
+        mock_get.return_value = {
+            "display_name": "X",
+            "summary_stats": {"h_index": 9000},
+        }
+        m = fetch_author_metric("https://openalex.org/A123", "")
+        self.assertEqual(m.h_index, 0)
+
+
 class TestMergeAndFallback(unittest.TestCase):
     def test_merge_prefers_openalex_when_known(self) -> None:
-        oa = PaperEnrichment("Alice", 5, "MIT", "Unknown")
-        kg = PaperEnrichment("Bob", 99, "Oxford", "Stanford")
+        oa = PaperEnrichment(
+            "Alice",
+            5,
+            "MIT",
+            "Unknown",
+            top_author_affiliation="Caltech",
+        )
+        kg = PaperEnrichment(
+            "Bob",
+            99,
+            "Oxford",
+            "Stanford",
+            top_author_affiliation="CERN",
+        )
         m = merge_paper_enrichment(oa, kg)
         assert m is not None
         self.assertEqual(m.top_author_name, "Alice")
         self.assertEqual(m.top_h_index, 5)
+
+    def test_merge_fills_h_from_kagi_when_same_name_and_oa_h_zero(self) -> None:
+        oa = PaperEnrichment(
+            "Ying Yuan",
+            0,
+            "MIT",
+            "MIT",
+            top_author_affiliation="Unknown",
+        )
+        kg = PaperEnrichment(
+            "Ying Yuan",
+            32,
+            "X",
+            "Y",
+            top_author_affiliation="Z",
+        )
+        m = merge_paper_enrichment(oa, kg)
+        assert m is not None
+        self.assertEqual(m.top_author_name, "Ying Yuan")
+        self.assertEqual(m.top_h_index, 32)
+
+    def test_merge_does_not_take_kagi_h_when_names_differ(self) -> None:
+        oa = PaperEnrichment(
+            "Alice",
+            0,
+            "MIT",
+            "MIT",
+            top_author_affiliation="Unknown",
+        )
+        kg = PaperEnrichment(
+            "Bob",
+            99,
+            "X",
+            "Y",
+            top_author_affiliation="Z",
+        )
+        m = merge_paper_enrichment(oa, kg)
+        assert m is not None
+        self.assertEqual(m.top_h_index, 0)
         self.assertEqual(m.first_affiliation, "MIT")
-        self.assertEqual(m.last_affiliation, "Stanford")
+        self.assertEqual(m.last_affiliation, "MIT")
+        # OpenAlex doesn't know top-author affiliation here, so we take Kagi's.
+        self.assertEqual(m.top_author_affiliation, "Z")
 
     def test_incomplete_when_aff_unknown(self) -> None:
         en = PaperEnrichment("A", 1, "MIT", "Unknown")
@@ -169,14 +249,58 @@ class TestMergeAndFallback(unittest.TestCase):
         class FakeKagi:
             def fastgpt_query(self, query: str, **kwargs: object) -> str:
                 return (
-                    '{"top_author_name": "Zed", "top_author_h_index": 3, '
-                    '"first_author_institution": "U1", "last_author_institution": "U2"}'
+                    '{"papers": [{"paper_id": "https://example.com/p", '
+                    '"top_author_name": "Zed", "top_author_h_index": 3, '
+                    '"top_author_institution": "Inst-Z", '
+                    '"first_author_institution": "U1", '
+                    '"last_author_institution": "U2"}]}'
                 )
 
         apply_kagi_metadata_backfill(by_link, [art], FakeKagi())  # type: ignore[arg-type]
         block = format_enrichment_for_feed(by_link[str(art.link)])
         self.assertIn("Zed", block)
+        self.assertIn("Inst-Z", block)
         self.assertIn("U1", block)
+
+    def test_apply_kagi_backfill_one_fastgpt_for_two_papers(self) -> None:
+        calls: list[int] = []
+
+        class FakeKagi:
+            def fastgpt_query(self, query: str, **kwargs: object) -> str:
+                calls.append(1)
+                return (
+                    '{"papers": ['
+                    '{"paper_id": "https://a.example/a", "top_author_name": "A1", '
+                    '"top_author_h_index": 1, "top_author_institution": "Ta", '
+                    '"first_author_institution": "Fa", "last_author_institution": "La"},'
+                    '{"paper_id": "https://b.example/b", "top_author_name": "B1", '
+                    '"top_author_h_index": 2, "top_author_institution": "Tb", '
+                    '"first_author_institution": "Fb", "last_author_institution": "Lb"}'
+                    "]}"
+                )
+
+        a1 = ArticleInfo(
+            title="T1",
+            link="https://a.example/a",
+            abstract="",
+            updated=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            authors="",
+        )
+        a2 = ArticleInfo(
+            title="T2",
+            link="https://b.example/b",
+            abstract="",
+            updated=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            authors="",
+        )
+        by_link: dict[str, PaperEnrichment | None] = {
+            str(a1.link): None,
+            str(a2.link): None,
+        }
+        apply_kagi_metadata_backfill(by_link, [a1, a2], FakeKagi())  # type: ignore[arg-type]
+        self.assertEqual(len(calls), 1)
+        self.assertIn("A1", format_enrichment_for_feed(by_link[str(a1.link)]))
+        self.assertIn("B1", format_enrichment_for_feed(by_link[str(a2.link)]))
 
 
 if __name__ == "__main__":

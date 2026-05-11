@@ -35,9 +35,10 @@ class TestKagiQuota(unittest.TestCase):
             consume_kagi_invocation(kind="fastgpt", openalex_fallback=True)
 
     def test_fallback_bucket_after_non_fallback_calls(self) -> None:
+        """Non-fallback fastgpt calls do not consume the OpenAlex fallback bucket."""
         for _ in range(5):
             consume_kagi_invocation(kind="fastgpt", openalex_fallback=False)
-        for _ in range(5):
+        for _ in range(MAX_OPENALEX_FALLBACK_FASTGPT_PER_RUN):
             consume_kagi_invocation(kind="fastgpt", openalex_fallback=True)
         with self.assertRaises(KagiOpenAlexFallbackQuotaExceeded):
             consume_kagi_invocation(kind="fastgpt", openalex_fallback=True)
