@@ -123,7 +123,12 @@ def _backfill_group_feed_categories(before: dict[str, Any], after: dict[str, Any
     return out
 
 
-def _markdown_groups_compact(before: dict[str, Any], after: dict[str, Any]) -> str:
+def _markdown_groups_compact(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    allowed_bucket_ids: frozenset[str] | None = None,
+) -> str:
     before = _backfill_group_feed_categories(before, after)
     b_ag = _aggregate_group_buckets(before)
     a_ag = _aggregate_group_buckets(after)
@@ -131,6 +136,8 @@ def _markdown_groups_compact(before: dict[str, Any], after: dict[str, Any]) -> s
     all_ids = sorted(set(b_ag) | set(a_ag), key=lambda bid: (0 if bid.startswith("c:") else 1, bid))
     changed = False
     for bid in all_ids:
+        if allowed_bucket_ids is not None and bid not in allowed_bucket_ids:
+            continue
         b = b_ag.get(bid)
         a = a_ag.get(bid)
         if b is None and a is None:
@@ -210,8 +217,17 @@ def _markdown_legacy_compact(before: dict[str, Any], after: dict[str, Any]) -> s
     return "".join(lines).strip()
 
 
-def markdown_config_diff(before: dict[str, Any] | None, after: dict[str, Any]) -> str:
-    """Human-readable markdown of differences between two normalized snapshots."""
+def markdown_config_diff(
+    before: dict[str, Any] | None,
+    after: dict[str, Any],
+    *,
+    allowed_bucket_ids: frozenset[str] | None = None,
+) -> str:
+    """Human-readable markdown of differences between two normalized snapshots.
+
+    For ``[[groups]]`` snapshots, ``allowed_bucket_ids`` limits sections to buckets
+    (category or per-group) that use the target Zulip stream in ``zulip_sources``.
+    """
     if before is None:
         return ""
     if before.get("mode") != after.get("mode"):
@@ -223,7 +239,9 @@ def markdown_config_diff(before: dict[str, Any] | None, after: dict[str, Any]) -
     if after["mode"] == "legacy":
         return _markdown_legacy_compact(before, after)
 
-    return _markdown_groups_compact(before, after)
+    return _markdown_groups_compact(
+        before, after, allowed_bucket_ids=allowed_bucket_ids
+    )
 
 
 def _load_state(path: Path) -> dict[str, Any]:
@@ -312,6 +330,26 @@ def _realm_stream_pairs_for_summary(cfg: dict) -> list[tuple[str, str]]:
     return out
 
 
+def _allowed_bucket_ids_for_realm_stream(
+    cfg: dict[str, Any], realm: str, stream: str
+) -> frozenset[str] | None:
+    """Bucket ids for `[[groups]]` rows that post journal suggestions to this stream.
+
+    Returns ``None`` for legacy top-level config (weekly body is not bucket-filtered).
+    """
+    if not cfg.get("groups"):
+        return None
+    r = realm.lower()
+    ids: set[str] = set()
+    for g in cfg["groups"]:
+        for pr, ps in unique_realm_stream_pairs(g.get("zulip_sources") or []):
+            if pr == r and ps == stream:
+                bid, _, _ = _bucket_id_title_for_group(g, cfg)
+                ids.add(bid)
+                break
+    return frozenset(ids)
+
+
 def maybe_post_weekly_journal_config_summary(
     *,
     config_path: Path,
@@ -375,8 +413,8 @@ def maybe_post_weekly_journal_config_summary(
     if now - baseline_last < SUMMARY_INTERVAL_SEC:
         return
 
-    body = markdown_config_diff(snap, current)
-    if not body:
+    body_full = markdown_config_diff(snap, current)
+    if not body_full:
         if dryrun:
             return
         state["snap"] = current
@@ -397,11 +435,30 @@ def maybe_post_weekly_journal_config_summary(
         f"## Weekly `config.toml` summary — `{config_path.name}`\n\n"
         f"_Changes since about **{since_dt}** (previous summary post or baseline)._\n\n"
     )
-    message = header + body
-    if len(message) > ZULIP_MESSAGE_MAX_CHARS:
-        message = message[: ZULIP_MESSAGE_MAX_CHARS - 40] + "\n\n_…(message truncated)_\n"
 
+    streams_with_relevant_updates = 0
     for realm, stream in pairs:
+        allowed = _allowed_bucket_ids_for_realm_stream(cfg, realm, stream)
+        if allowed is None:
+            stream_body = body_full
+        else:
+            stream_body = markdown_config_diff(
+                snap, current, allowed_bucket_ids=allowed
+            )
+        if not stream_body:
+            if dryrun:
+                logger.info(
+                    "[dry run] journal weekly summary: skip realm=%s stream=%s "
+                    "(no diff for this stream's categories/groups)",
+                    realm,
+                    stream,
+                )
+            continue
+        streams_with_relevant_updates += 1
+        message = header + stream_body
+        if len(message) > ZULIP_MESSAGE_MAX_CHARS:
+            message = message[: ZULIP_MESSAGE_MAX_CHARS - 40] + "\n\n_…(message truncated)_\n"
+
         try:
             client = _client_for_realm(zulip_realms, realm)
         except Exception:
@@ -438,12 +495,21 @@ def maybe_post_weekly_journal_config_summary(
             )
 
     if dryrun:
+        logger.info(
+            "Journal weekly summary dry run for %s: %d stream destination(s) would receive "
+            "a relevant digest (of %d configured)",
+            config_path.name,
+            streams_with_relevant_updates,
+            len(pairs),
+        )
         return
     state["snap"] = current
     state["last_summary_post_unix"] = time.time()
     _save_state(state_path, state)
     logger.info(
-        "Posted journal weekly summary for %s to %d Zulip destination(s)",
+        "Posted journal weekly summary for %s (%d stream destination(s) with relevant updates, "
+        "%d configured)",
         config_path.name,
+        streams_with_relevant_updates,
         len(pairs),
     )

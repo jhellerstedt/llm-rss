@@ -122,6 +122,83 @@ class TestMarkdownConfigDiff(unittest.TestCase):
         self.assertIn("Journal feeds:** 3", md)
         self.assertIn("**1** RSS URL(s) added", md)
 
+    def test_filter_excludes_other_category_buckets(self) -> None:
+        before = {
+            "mode": "groups",
+            "groups": [
+                {
+                    "name": "cm_g",
+                    "feed_category": "cm",
+                    "urls": ["https://cm/rss"],
+                    "research_areas": [],
+                    "excluded_areas": [],
+                },
+                {
+                    "name": "bio_g",
+                    "feed_category": "bio",
+                    "urls": ["https://bio/rss"],
+                    "research_areas": [],
+                    "excluded_areas": [],
+                },
+            ],
+        }
+        after = {
+            "mode": "groups",
+            "groups": [
+                {
+                    "name": "cm_g",
+                    "feed_category": "cm",
+                    "urls": ["https://cm/rss"],
+                    "research_areas": [],
+                    "excluded_areas": [],
+                },
+                {
+                    "name": "bio_g",
+                    "feed_category": "bio",
+                    "urls": ["https://bio/rss", "https://bio/new"],
+                    "research_areas": [],
+                    "excluded_areas": [],
+                },
+            ],
+        }
+        md_cm = markdown_config_diff(before, after, allowed_bucket_ids=frozenset({"c:cm"}))
+        self.assertEqual(md_cm, "")
+
+        md_bio = markdown_config_diff(before, after, allowed_bucket_ids=frozenset({"c:bio"}))
+        self.assertIn("Category `bio`", md_bio)
+        self.assertIn("**1** RSS URL(s) added", md_bio)
+        self.assertNotIn("`cm`", md_bio)
+
+    def test_filter_keeps_group_bucket_when_no_category(self) -> None:
+        before = {
+            "mode": "groups",
+            "groups": [
+                {
+                    "name": "solo",
+                    "feed_category": None,
+                    "urls": [],
+                    "research_areas": [],
+                    "excluded_areas": [],
+                },
+            ],
+        }
+        after = {
+            "mode": "groups",
+            "groups": [
+                {
+                    "name": "solo",
+                    "feed_category": None,
+                    "urls": ["https://x/rss"],
+                    "research_areas": [],
+                    "excluded_areas": [],
+                },
+            ],
+        }
+        md = markdown_config_diff(before, after, allowed_bucket_ids=frozenset({"g:solo"}))
+        self.assertIn("Group `solo`", md)
+        md_other = markdown_config_diff(before, after, allowed_bucket_ids=frozenset({"g:other"}))
+        self.assertEqual(md_other, "")
+
 
 if __name__ == "__main__":
     unittest.main()
