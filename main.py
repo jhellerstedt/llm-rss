@@ -215,6 +215,9 @@ def make_kagi_client(kagi_table: dict) -> KagiClient:
         use_cache=bool(kagi_table.get("use_cache", True)),
         max_concurrent_api_requests=int(kagi_table.get("max_concurrent_api_requests", 2)),
         max_http_attempts=int(kagi_table.get("max_http_attempts", 12)),
+        min_seconds_between_requests=float(
+            kagi_table.get("min_seconds_between_requests", 2.0)
+        ),
     )
 
 

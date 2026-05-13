@@ -48,6 +48,7 @@ class KagiClient:
         use_cache: bool = True,
         max_concurrent_api_requests: int = 2,
         max_http_attempts: int = 12,
+        min_seconds_between_requests: float = 2.0,
     ):
         self.api_key = (api_key or os.environ.get("KAGI_API_KEY", "")).strip()
         self.fastgpt_url = fastgpt_url
@@ -61,6 +62,9 @@ class KagiClient:
         self.max_concurrent_api_requests = max(1, mc)
         self._api_semaphore = threading.BoundedSemaphore(self.max_concurrent_api_requests)
         self.max_http_attempts = max(1, int(max_http_attempts))
+        self.min_seconds_between_requests = max(0.0, float(min_seconds_between_requests))
+        self._pace_lock = threading.Lock()
+        self._next_allowed_start = 0.0
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -85,6 +89,18 @@ class KagiClient:
         finally:
             self._api_semaphore.release()
 
+    def _pace_before_request(self) -> None:
+        """Space out request starts so concurrent batches do not hammer Kagi."""
+        if self.min_seconds_between_requests <= 0:
+            return
+        with self._pace_lock:
+            now = time.monotonic()
+            wait = self._next_allowed_start - now
+            if wait > 0:
+                time.sleep(wait)
+                now = time.monotonic()
+            self._next_allowed_start = now + self.min_seconds_between_requests
+
     def _post_json_with_retries_inner(
         self,
         url: str,
@@ -96,7 +112,22 @@ class KagiClient:
         last_exc: Exception | None = None
         rate_limit_attempts = 0
         for attempt in range(1, max_attempts + 1):
-            r = requests.post(url, headers=self._headers(), json=payload, timeout=timeout)
+            self._pace_before_request()
+            try:
+                r = requests.post(url, headers=self._headers(), json=payload, timeout=timeout)
+            except requests.Timeout as e:
+                last_exc = e
+                if attempt < max_attempts:
+                    delay = min(120.0, (2 ** (attempt - 1))) + random.random()
+                    logger.warning(
+                        "Kagi request timed out; retrying in %.1fs (attempt %s/%s)",
+                        delay,
+                        attempt,
+                        max_attempts,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
             if url.rstrip("/") == self.fastgpt_url.rstrip("/"):
                 record_kagi_fastgpt_http(1)
             elif url.rstrip("/") == self.summarize_url.rstrip("/"):

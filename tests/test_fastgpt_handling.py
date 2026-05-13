@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from kagi_quota import reset_kagi_session_quota
 
 
@@ -73,6 +75,26 @@ class TestFastGPTHandling(unittest.TestCase):
                 self.assertIn('"relevance"', out)
                 self.assertEqual(post.call_count, 2)
                 sleep.assert_called()
+
+    def test_fastgpt_retries_on_read_timeout(self) -> None:
+        from kagi_client import KagiClient
+
+        r200 = Mock()
+        r200.status_code = 200
+        r200.headers = {}
+        r200.raise_for_status.return_value = None
+        r200.json.return_value = {"data": {"output": '{"relevance": 3, "impact": 4, "reason": "ok"}'}}
+
+        with patch("kagi_client.requests.post", side_effect=[requests.ReadTimeout("rt"), r200]) as post:
+            with patch("time.sleep"):
+                c = KagiClient(
+                    api_key="x",
+                    use_cache=True,
+                    min_seconds_between_requests=0,
+                )
+                out = c.fastgpt_query("q")
+                self.assertIn('"relevance"', out)
+                self.assertEqual(post.call_count, 2)
 
 
 if __name__ == "__main__":

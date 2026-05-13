@@ -10,7 +10,9 @@ summarize_timeout = 180
 use_cache = true
 # Limit parallel FastGPT/Summarizer HTTP calls (strongly reduces 429 rate limits)
 max_concurrent_api_requests = 2
-# Retries per request (429 / transient 5xx)
+# Minimum seconds between the start of successive Kagi HTTP requests (eases read timeouts under load)
+min_seconds_between_requests = 2
+# Retries per request (429 / transient 5xx / read timeout)
 max_http_attempts = 12
 # Local keyword shortlist before Kagi; articles are scored in batches (fewer FastGPT calls).
 prefilter_max_candidates = 20
