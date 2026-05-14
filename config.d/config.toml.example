@@ -36,6 +36,14 @@ feed_link = "jhell.imipolex.biz/feeds"
 context_max_chars = 12000
 # When groups use zulip_sources, post a weekly digest of config.toml edits to topic "journal suggestions".
 # journal_weekly_summary = false
+#
+# When true, top "feedback ranking" picks are appended to a JSON queue next to this TOML instead of posting
+# immediately. Drain the queue with hourly cron, for example:
+#   0 * * * * cd /path/to/llm-rss && .venv/bin/python main.py --dispatch-feedback-queue --config-path config.d/config.toml
+# Each run posts at most one queued paper per Zulip stream (topic "feedback ranking").
+# feedback_ranking_use_queue = true
+# Optional queue file path (relative to this TOML's directory; default: <stem>.feedback_ranking_queue.json).
+# feedback_ranking_queue_file = "data/feedback_ranking_queue.json"
 
 # Topical group 1: condensed matter / general physics journals
 [[groups]]

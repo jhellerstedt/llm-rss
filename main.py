@@ -2,7 +2,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import toml
 import typer
@@ -37,6 +37,10 @@ from zulip_feedback import (
     load_feedback_state_for_group,
     post_feedback_ranking_for_new_items,
     select_top_ranked_for_feedback_posts,
+)
+from zulip_feedback_queue import (
+    dispatch_feedback_ranking_queue_once,
+    enqueue_feedback_ranking_for_group,
 )
 from journal_venue import VenueBucket, tracked_venues_from_group_urls
 from zulip_journal_suggestions import (
@@ -228,6 +232,7 @@ def process_group(
     zulip_cfg: dict,
     openalex_cfg: dict,
     dryrun: bool,
+    config_path: Path,
     *,
     kagi_prefilter_cap: int = 20,
     kagi_batch_size: int = 5,
@@ -430,18 +435,37 @@ def process_group(
             ],
         )
         if feedback_post_links:
-            logger.info(
-                "Zulip feedback ranking: posting up to %d article(s) for group %s (by relevance, impact)",
-                len(feedback_post_links),
-                group_name,
-            )
-            post_feedback_ranking_for_new_items(
-                zulip_sources,
-                zulip_realms,
-                messages_by_pair=feedback_msgs_by_pair,
-                titles_and_links=feedback_post_links,
-                dryrun=dryrun,
-            )
+            use_queue = bool(zulip_cfg.get("feedback_ranking_use_queue"))
+            if use_queue:
+                logger.info(
+                    "Zulip feedback ranking: queuing up to %d article(s) for group %s "
+                    "(hourly dispatch via --dispatch-feedback-queue)",
+                    len(feedback_post_links),
+                    group_name,
+                )
+                enqueue_feedback_ranking_for_group(
+                    config_path,
+                    zulip_cfg,
+                    zulip_sources,
+                    feedback_msgs_by_pair,
+                    feedback_post_links,
+                    group_name=group_name,
+                    dryrun=dryrun,
+                )
+            else:
+                logger.info(
+                    "Zulip feedback ranking: posting up to %d article(s) for group %s "
+                    "(by relevance, impact)",
+                    len(feedback_post_links),
+                    group_name,
+                )
+                post_feedback_ranking_for_new_items(
+                    zulip_sources,
+                    zulip_realms,
+                    messages_by_pair=feedback_msgs_by_pair,
+                    titles_and_links=feedback_post_links,
+                    dryrun=dryrun,
+                )
 
     n_scored = len(recent_articles)
     n_new_this_run = len(new_items)
@@ -530,6 +554,7 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 zulip_cfg,
                 openalex_cfg,
                 dryrun,
+                config_path,
                 kagi_prefilter_cap=pf_cap,
                 kagi_batch_size=batch_sz,
             )
@@ -693,11 +718,60 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         log_kagi_quota_status(logger)
 
 
+def _dispatch_feedback_queue_configs(
+    config_dir: Path, config_path: Optional[Path], dryrun: bool
+) -> None:
+    """Load Zulip credentials and drain at most one queued feedback post per stream."""
+    if config_path is None:
+        paths = sorted(config_dir.glob("*.toml"))
+        for p in paths:
+            print(f"{p}:")
+            _dispatch_feedback_queue_single(p, dryrun)
+    else:
+        _dispatch_feedback_queue_single(config_path, dryrun)
+
+
+def _dispatch_feedback_queue_single(config_path: Path, dryrun: bool) -> None:
+    cfg = toml.load(config_path)
+    zulip_cfg = cfg.get("zulip") or {}
+    realms_path_cfg = zulip_cfg.get("realms_config_file")
+    if realms_path_cfg:
+        rp = Path(realms_path_cfg)
+        if not rp.is_absolute():
+            rp = (config_path.parent / rp).resolve()
+        realms_path = str(rp)
+    else:
+        realms_path = os.environ.get("ZULIP_REALMS_CONFIG_FILE")
+    zulip_realms = load_zulip_realms(
+        config_file=realms_path, config_dir=config_path.parent
+    )
+    dispatch_feedback_ranking_queue_once(
+        config_path, cfg, zulip_realms, dryrun=dryrun
+    )
+
+
 def _main(
     config_dir: Path = Path("config.d"),
-    config_path: Path | None = None,
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config-path",
+        help="Single TOML config file (default: process every *.toml in config-dir).",
+    ),
     dryrun: bool = False,
+    dispatch_feedback_queue: bool = typer.Option(
+        False,
+        "--dispatch-feedback-queue",
+        help="Only drain the feedback-ranking JSON queue (one post per Zulip stream per run); "
+        "use hourly cron alongside the normal feed run.",
+    ),
 ) -> None:
+    if dispatch_feedback_queue:
+        reset_api_usage_stats()
+        try:
+            _dispatch_feedback_queue_configs(config_dir, config_path, dryrun)
+        finally:
+            log_api_usage_summary(logger)
+        return
     if config_path is None:
         paths = sorted(config_dir.glob("*.toml"))
         for p in paths:
