@@ -94,6 +94,22 @@ class TestBuildEnrichment(unittest.TestCase):
         self.assertEqual(en.top_author_affiliation, "Somewhere Institute")
         self.assertEqual(en.first_affiliation, "MIT")
         self.assertEqual(en.last_affiliation, "Stanford University")
+        self.assertEqual(en.author_count, 3)
+
+    def test_author_count_one(self) -> None:
+        work = {
+            "authorships": [
+                {
+                    "author_position": "first",
+                    "author": {"id": "https://openalex.org/A1"},
+                    "institutions": [{"display_name": "Solo U"}],
+                },
+            ],
+        }
+        metrics = {"https://openalex.org/A1": AuthorMetric("Only", 20)}
+        en = build_enrichment_for_work(work, metrics)
+        assert en is not None
+        self.assertEqual(en.author_count, 1)
 
     def test_single_affiliation_line_when_same(self) -> None:
         en = PaperEnrichment(
@@ -138,6 +154,8 @@ class TestBatchEnrichMocked(unittest.TestCase):
         block = format_enrichment_for_feed(out[str(art.link)])
         self.assertIn("h-index 7", block)
         self.assertIn("Solo", block)
+        assert out[str(art.link)] is not None
+        self.assertEqual(out[str(art.link)].author_count, 2)
 
 
 class TestPlausibleHIndex(unittest.TestCase):
@@ -184,6 +202,33 @@ class TestMergeAndFallback(unittest.TestCase):
         assert m is not None
         self.assertEqual(m.top_author_name, "Alice")
         self.assertEqual(m.top_h_index, 5)
+        self.assertIsNone(m.author_count)
+
+    def test_merge_prefers_openalex_author_count(self) -> None:
+        oa = PaperEnrichment(
+            "A",
+            1,
+            "U1",
+            "U2",
+            author_count=1,
+        )
+        kg = PaperEnrichment(
+            "B",
+            9,
+            "X",
+            "Y",
+            author_count=99,
+        )
+        m = merge_paper_enrichment(oa, kg)
+        assert m is not None
+        self.assertEqual(m.author_count, 1)
+
+    def test_merge_author_count_from_kagi_when_oa_missing(self) -> None:
+        oa = PaperEnrichment("A", 1, "M", "M", author_count=None)
+        kg = PaperEnrichment("B", 2, "X", "Y", author_count=4)
+        m = merge_paper_enrichment(oa, kg)
+        assert m is not None
+        self.assertEqual(m.author_count, 4)
 
     def test_merge_fills_h_from_kagi_when_same_name_and_oa_h_zero(self) -> None:
         oa = PaperEnrichment(

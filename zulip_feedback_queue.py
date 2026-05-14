@@ -49,18 +49,29 @@ def paper_enrichment_to_json(en: PaperEnrichment | None) -> dict[str, Any] | Non
         "first_affiliation": en.first_affiliation,
         "last_affiliation": en.last_affiliation,
         "top_author_affiliation": en.top_author_affiliation,
+        "author_count": en.author_count,
     }
 
 
 def paper_enrichment_from_json(data: dict[str, Any] | None) -> PaperEnrichment | None:
     if not data:
         return None
+    raw_ac = data.get("author_count")
+    author_count: int | None
+    if raw_ac is None:
+        author_count = None
+    else:
+        try:
+            author_count = int(raw_ac)
+        except (TypeError, ValueError):
+            author_count = None
     return PaperEnrichment(
         top_author_name=str(data.get("top_author_name", "")),
         top_h_index=int(data.get("top_h_index", 0)),
         first_affiliation=str(data.get("first_affiliation", "")),
         last_affiliation=str(data.get("last_affiliation", "")),
         top_author_affiliation=str(data.get("top_author_affiliation", "Unknown")),
+        author_count=author_count,
     )
 
 

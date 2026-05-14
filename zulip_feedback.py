@@ -144,17 +144,43 @@ def format_feedback_post_body(
     return base
 
 
+def _impact_for_feedback_ranking(
+    impact: int,
+    enrichment: PaperEnrichment | None,
+    *,
+    single_author_penalty: int,
+) -> int:
+    """Impact score used only for ordering Zulip feedback picks (raw scores unchanged elsewhere)."""
+    if (
+        single_author_penalty > 0
+        and enrichment is not None
+        and enrichment.author_count == 1
+    ):
+        return max(0, impact - single_author_penalty)
+    return impact
+
+
 def select_top_ranked_for_feedback_posts(
     title_link_scores: list[tuple[str, str, int, int, PaperEnrichment | None]],
     *,
     max_posts: int = MAX_FEEDBACK_RANKING_POSTS_PER_GROUP,
+    single_author_impact_penalty: int = 1,
 ) -> list[tuple[str, str, PaperEnrichment | None]]:
-    """Pick up to ``max_posts`` items with highest (relevance, impact), unique by normalized link."""
+    """Pick up to ``max_posts`` items with highest (relevance, adjusted impact).
+
+    When OpenAlex enrichment has ``author_count == 1``, ``impact`` is reduced by
+    ``single_author_impact_penalty`` (clamped at 0) for this sort only. Set penalty
+    to 0 to disable. Thresholds and feed text still use the model's raw scores.
+    """
     if max_posts <= 0:
         return []
+    pen = max(0, int(single_author_impact_penalty))
     ranked = sorted(
         title_link_scores,
-        key=lambda t: (-t[2], -t[3]),
+        key=lambda t: (
+            -t[2],
+            -_impact_for_feedback_ranking(t[3], t[4], single_author_penalty=pen),
+        ),
     )
     out: list[tuple[str, str, PaperEnrichment | None]] = []
     seen_keys: set[str] = set()

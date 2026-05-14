@@ -29,6 +29,19 @@ class TestPaperEnrichmentJson(unittest.TestCase):
         back = paper_enrichment_from_json(d)
         self.assertEqual(back, en)
 
+    def test_roundtrip_with_author_count(self) -> None:
+        en = PaperEnrichment(
+            top_author_name="A",
+            top_h_index=1,
+            first_affiliation="X",
+            last_affiliation="Y",
+            top_author_affiliation="Z",
+            author_count=1,
+        )
+        d = paper_enrichment_to_json(en)
+        self.assertEqual(d.get("author_count"), 1)
+        self.assertEqual(paper_enrichment_from_json(d), en)
+
     def test_none(self) -> None:
         self.assertIsNone(paper_enrichment_to_json(None))
         self.assertIsNone(paper_enrichment_from_json(None))

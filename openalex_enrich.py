@@ -54,6 +54,8 @@ class PaperEnrichment:
     first_affiliation: str
     last_affiliation: str
     top_author_affiliation: str = "Unknown"
+    #: From OpenAlex ``len(authorships)`` when a work is resolved; ``None`` if unknown.
+    author_count: int | None = None
 
     def format_block(self) -> str:
         lines = [
@@ -164,12 +166,18 @@ def merge_paper_enrichment(
         if not _is_unknown(openalex.top_author_affiliation)
         else kagi.top_author_affiliation
     )
+    ac = (
+        openalex.author_count
+        if openalex.author_count is not None
+        else kagi.author_count
+    )
     return PaperEnrichment(
         top_author_name=top_name,
         top_h_index=top_h,
         first_affiliation=first,
         last_affiliation=last,
         top_author_affiliation=top_aff,
+        author_count=ac,
     )
 
 
@@ -572,6 +580,7 @@ def build_enrichment_for_work(
         first_affiliation=first_aff,
         last_affiliation=last_aff,
         top_author_affiliation=top_aff,
+        author_count=len(authorships),
     )
 
 

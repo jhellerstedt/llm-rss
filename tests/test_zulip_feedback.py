@@ -144,6 +144,54 @@ class TestSelectTopRankedForFeedback(unittest.TestCase):
         self.assertEqual(picked[0][1], "https://a.org/2")
         self.assertEqual(picked[1][1], "https://a.org/4")
 
+    def test_single_author_impact_penalty_reorders(self) -> None:
+        solo = PaperEnrichment(
+            top_author_name="S",
+            top_h_index=1,
+            first_affiliation="U",
+            last_affiliation="U",
+            author_count=1,
+        )
+        duo = PaperEnrichment(
+            top_author_name="A",
+            top_h_index=1,
+            first_affiliation="U1",
+            last_affiliation="U2",
+            author_count=2,
+        )
+        rows = [
+            ("Solo high impact", "https://a.org/s", 8, 9, solo),
+            ("Pair lower raw impact", "https://a.org/p", 8, 8, duo),
+        ]
+        picked = select_top_ranked_for_feedback_posts(
+            rows, max_posts=1, single_author_impact_penalty=2
+        )
+        self.assertEqual(picked[0][1], "https://a.org/p")
+
+    def test_single_author_penalty_zero_is_noop(self) -> None:
+        solo = PaperEnrichment(
+            top_author_name="S",
+            top_h_index=1,
+            first_affiliation="U",
+            last_affiliation="U",
+            author_count=1,
+        )
+        duo = PaperEnrichment(
+            top_author_name="A",
+            top_h_index=1,
+            first_affiliation="U1",
+            last_affiliation="U2",
+            author_count=2,
+        )
+        rows = [
+            ("Solo", "https://a.org/s", 8, 9, solo),
+            ("Pair", "https://a.org/p", 8, 8, duo),
+        ]
+        picked = select_top_ranked_for_feedback_posts(
+            rows, max_posts=1, single_author_impact_penalty=0
+        )
+        self.assertEqual(picked[0][1], "https://a.org/s")
+
     def test_same_link_once(self) -> None:
         rows = [
             ("A", "https://x.org/p", 9, 9, None),

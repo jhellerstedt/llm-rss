@@ -422,6 +422,7 @@ def process_group(
         )
 
     if zulip_sources and zulip_realms and passing:
+        fb_penalty = max(0, int(group.get("single_author_impact_penalty", 1)))
         feedback_post_links = select_top_ranked_for_feedback_posts(
             [
                 (
@@ -433,6 +434,7 @@ def process_group(
                 )
                 for a, r in passing
             ],
+            single_author_impact_penalty=fb_penalty,
         )
         if feedback_post_links:
             use_queue = bool(zulip_cfg.get("feedback_ranking_use_queue"))
