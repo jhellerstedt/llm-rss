@@ -19,9 +19,9 @@ class TestPaperEnrichmentJson(unittest.TestCase):
     def test_roundtrip(self) -> None:
         en = PaperEnrichment(
             top_author_name="A",
-            top_h_index=10,
             first_affiliation="X",
             last_affiliation="Y",
+            top_h_index=10,
             top_author_affiliation="Z",
         )
         d = paper_enrichment_to_json(en)
@@ -32,14 +32,26 @@ class TestPaperEnrichmentJson(unittest.TestCase):
     def test_roundtrip_with_author_count(self) -> None:
         en = PaperEnrichment(
             top_author_name="A",
-            top_h_index=1,
             first_affiliation="X",
             last_affiliation="Y",
+            top_h_index=1,
             top_author_affiliation="Z",
             author_count=1,
         )
         d = paper_enrichment_to_json(en)
         self.assertEqual(d.get("author_count"), 1)
+        self.assertEqual(paper_enrichment_from_json(d), en)
+
+    def test_roundtrip_null_top_h_index(self) -> None:
+        en = PaperEnrichment(
+            top_author_name="A",
+            first_affiliation="X",
+            last_affiliation="Y",
+            top_h_index=None,
+            top_author_affiliation="Z",
+        )
+        d = paper_enrichment_to_json(en)
+        self.assertIsNone(d.get("top_h_index"))
         self.assertEqual(paper_enrichment_from_json(d), en)
 
     def test_none(self) -> None:

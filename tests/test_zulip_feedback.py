@@ -51,9 +51,9 @@ class TestZulipFeedbackParsing(unittest.TestCase):
     def test_format_feedback_post_body_includes_enrichment(self) -> None:
         en = PaperEnrichment(
             top_author_name="Ada Lovelace",
-            top_h_index=42,
             first_affiliation="Unknown",
             last_affiliation="Unknown",
+            top_h_index=42,
             top_author_affiliation="Analytical Engines Ltd",
         )
         b = format_feedback_post_body("T", "https://x.org/p", en)
@@ -147,16 +147,16 @@ class TestSelectTopRankedForFeedback(unittest.TestCase):
     def test_single_author_impact_penalty_reorders(self) -> None:
         solo = PaperEnrichment(
             top_author_name="S",
-            top_h_index=1,
             first_affiliation="U",
             last_affiliation="U",
+            top_h_index=1,
             author_count=1,
         )
         duo = PaperEnrichment(
             top_author_name="A",
-            top_h_index=1,
             first_affiliation="U1",
             last_affiliation="U2",
+            top_h_index=1,
             author_count=2,
         )
         rows = [
@@ -171,16 +171,16 @@ class TestSelectTopRankedForFeedback(unittest.TestCase):
     def test_single_author_penalty_zero_is_noop(self) -> None:
         solo = PaperEnrichment(
             top_author_name="S",
-            top_h_index=1,
             first_affiliation="U",
             last_affiliation="U",
+            top_h_index=1,
             author_count=1,
         )
         duo = PaperEnrichment(
             top_author_name="A",
-            top_h_index=1,
             first_affiliation="U1",
             last_affiliation="U2",
+            top_h_index=1,
             author_count=2,
         )
         rows = [

@@ -114,9 +114,9 @@ class TestBuildEnrichment(unittest.TestCase):
     def test_single_affiliation_line_when_same(self) -> None:
         en = PaperEnrichment(
             top_author_name="A",
-            top_h_index=1,
             first_affiliation="MIT",
             last_affiliation="MIT",
+            top_h_index=1,
         )
         self.assertIn("first & last author", en.format_block())
         self.assertNotIn("First author institution", en.format_block())
@@ -170,7 +170,7 @@ class TestPlausibleHIndex(unittest.TestCase):
                 "last_author_institution": "U",
             }
         )
-        self.assertEqual(row.top_author_h_index, 0)
+        self.assertIsNone(row.top_author_h_index)
 
     @patch("openalex_enrich._get_json")
     def test_openalex_author_clamps_absurd_h(self, mock_get: unittest.mock.MagicMock) -> None:
@@ -179,23 +179,23 @@ class TestPlausibleHIndex(unittest.TestCase):
             "summary_stats": {"h_index": 9000},
         }
         m = fetch_author_metric("https://openalex.org/A123", "")
-        self.assertEqual(m.h_index, 0)
+        self.assertIsNone(m.h_index)
 
 
 class TestMergeAndFallback(unittest.TestCase):
     def test_merge_prefers_openalex_when_known(self) -> None:
         oa = PaperEnrichment(
-            "Alice",
-            5,
-            "MIT",
-            "Unknown",
+            top_author_name="Alice",
+            first_affiliation="MIT",
+            last_affiliation="Unknown",
+            top_h_index=5,
             top_author_affiliation="Caltech",
         )
         kg = PaperEnrichment(
-            "Bob",
-            99,
-            "Oxford",
-            "Stanford",
+            top_author_name="Bob",
+            first_affiliation="Oxford",
+            last_affiliation="Stanford",
+            top_h_index=99,
             top_author_affiliation="CERN",
         )
         m = merge_paper_enrichment(oa, kg)
@@ -206,17 +206,17 @@ class TestMergeAndFallback(unittest.TestCase):
 
     def test_merge_prefers_openalex_author_count(self) -> None:
         oa = PaperEnrichment(
-            "A",
-            1,
-            "U1",
-            "U2",
+            top_author_name="A",
+            first_affiliation="U1",
+            last_affiliation="U2",
+            top_h_index=1,
             author_count=1,
         )
         kg = PaperEnrichment(
-            "B",
-            9,
-            "X",
-            "Y",
+            top_author_name="B",
+            first_affiliation="X",
+            last_affiliation="Y",
+            top_h_index=9,
             author_count=99,
         )
         m = merge_paper_enrichment(oa, kg)
@@ -224,25 +224,37 @@ class TestMergeAndFallback(unittest.TestCase):
         self.assertEqual(m.author_count, 1)
 
     def test_merge_author_count_from_kagi_when_oa_missing(self) -> None:
-        oa = PaperEnrichment("A", 1, "M", "M", author_count=None)
-        kg = PaperEnrichment("B", 2, "X", "Y", author_count=4)
+        oa = PaperEnrichment(
+            top_author_name="A",
+            first_affiliation="M",
+            last_affiliation="M",
+            top_h_index=1,
+            author_count=None,
+        )
+        kg = PaperEnrichment(
+            top_author_name="B",
+            first_affiliation="X",
+            last_affiliation="Y",
+            top_h_index=2,
+            author_count=4,
+        )
         m = merge_paper_enrichment(oa, kg)
         assert m is not None
         self.assertEqual(m.author_count, 4)
 
     def test_merge_fills_h_from_kagi_when_same_name_and_oa_h_zero(self) -> None:
         oa = PaperEnrichment(
-            "Ying Yuan",
-            0,
-            "MIT",
-            "MIT",
+            top_author_name="Ying Yuan",
+            first_affiliation="MIT",
+            last_affiliation="MIT",
+            top_h_index=0,
             top_author_affiliation="Unknown",
         )
         kg = PaperEnrichment(
-            "Ying Yuan",
-            32,
-            "X",
-            "Y",
+            top_author_name="Ying Yuan",
+            first_affiliation="X",
+            last_affiliation="Y",
+            top_h_index=32,
             top_author_affiliation="Z",
         )
         m = merge_paper_enrichment(oa, kg)
@@ -252,17 +264,17 @@ class TestMergeAndFallback(unittest.TestCase):
 
     def test_merge_does_not_take_kagi_h_when_names_differ(self) -> None:
         oa = PaperEnrichment(
-            "Alice",
-            0,
-            "MIT",
-            "MIT",
+            top_author_name="Alice",
+            first_affiliation="MIT",
+            last_affiliation="MIT",
+            top_h_index=0,
             top_author_affiliation="Unknown",
         )
         kg = PaperEnrichment(
-            "Bob",
-            99,
-            "X",
-            "Y",
+            top_author_name="Bob",
+            first_affiliation="X",
+            last_affiliation="Y",
+            top_h_index=99,
             top_author_affiliation="Z",
         )
         m = merge_paper_enrichment(oa, kg)
@@ -273,13 +285,51 @@ class TestMergeAndFallback(unittest.TestCase):
         # OpenAlex doesn't know top-author affiliation here, so we take Kagi's.
         self.assertEqual(m.top_author_affiliation, "Z")
 
+    def test_merge_fills_h_from_kagi_when_same_name_and_oa_h_missing(self) -> None:
+        oa = PaperEnrichment(
+            top_author_name="Ying Yuan",
+            first_affiliation="MIT",
+            last_affiliation="MIT",
+            top_h_index=None,
+            top_author_affiliation="Unknown",
+        )
+        kg = PaperEnrichment(
+            top_author_name="Ying Yuan",
+            first_affiliation="X",
+            last_affiliation="Y",
+            top_h_index=32,
+            top_author_affiliation="Z",
+        )
+        m = merge_paper_enrichment(oa, kg)
+        assert m is not None
+        self.assertEqual(m.top_h_index, 32)
+
     def test_incomplete_when_aff_unknown(self) -> None:
-        en = PaperEnrichment("A", 1, "MIT", "Unknown")
+        en = PaperEnrichment(
+            top_author_name="A",
+            first_affiliation="MIT",
+            last_affiliation="Unknown",
+            top_h_index=1,
+        )
         self.assertTrue(paper_enrichment_incomplete(en))
 
     def test_format_skips_all_unknown(self) -> None:
-        z = PaperEnrichment("Unknown", 0, "Unknown", "Unknown")
+        z = PaperEnrichment(
+            top_author_name="Unknown",
+            first_affiliation="Unknown",
+            last_affiliation="Unknown",
+            top_h_index=None,
+        )
         self.assertEqual(format_enrichment_for_feed(z), "")
+
+    def test_format_shows_na_when_h_missing_but_name_known(self) -> None:
+        en = PaperEnrichment(
+            top_author_name="Ada",
+            first_affiliation="MIT",
+            last_affiliation="Stanford",
+            top_h_index=None,
+        )
+        self.assertIn("h-index n/a", en.format_block())
 
     def test_apply_kagi_backfill_merges(self) -> None:
         art = ArticleInfo(

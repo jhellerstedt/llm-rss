@@ -44,23 +44,26 @@ _DOI = re.compile(r"(10\.\d{4,9}/[^\s?#%]+)", re.IGNORECASE)
 @dataclass(frozen=True)
 class AuthorMetric:
     display_name: str
-    h_index: int
+    #: Bibliometric h-index when known; ``None`` when missing or not credible.
+    h_index: int | None
 
 
 @dataclass(frozen=True)
 class PaperEnrichment:
     top_author_name: str
-    top_h_index: int
     first_affiliation: str
     last_affiliation: str
+    #: ``0`` is a real h-index; ``None`` means unknown / not available (display ``n/a``).
+    top_h_index: int | None = None
     top_author_affiliation: str = "Unknown"
     #: From OpenAlex ``len(authorships)`` when a work is resolved; ``None`` if unknown.
     author_count: int | None = None
 
     def format_block(self) -> str:
+        h_label = _h_index_display(self.top_h_index)
         lines = [
             f"Highest h-index author on this paper: {self.top_author_name} "
-            f"(h-index {self.top_h_index})",
+            f"(h-index {h_label})",
         ]
         if not _is_unknown(self.top_author_affiliation):
             lines.append(f"That author's affiliation: {self.top_author_affiliation}")
@@ -85,9 +88,20 @@ def _norm_person_name(name: str) -> str:
     return re.sub(r"\s+", " ", t)
 
 
-def _plausible_author_h_index(h: int) -> int:
-    """Drop obviously wrong h-index values (LLM / source confusion with citations)."""
-    if h <= 0:
+def _h_index_display(h: int | None) -> str:
+    return "n/a" if h is None else str(h)
+
+
+def _h_index_rank(h: int | None) -> int:
+    """Sort key for picking the author with the highest h-index (missing below any real value)."""
+    return -1 if h is None else h
+
+
+def _plausible_author_h_index(h: int) -> int | None:
+    """Reject obviously wrong h-index values (LLM / source confusion with citations)."""
+    if h < 0:
+        return None
+    if h == 0:
         return 0
     if h > _MAX_PLAUSIBLE_AUTHOR_H_INDEX:
         logger.warning(
@@ -95,7 +109,7 @@ def _plausible_author_h_index(h: int) -> int:
             h,
             _MAX_PLAUSIBLE_AUTHOR_H_INDEX,
         )
-        return 0
+        return None
     return h
 
 
@@ -115,7 +129,7 @@ def paper_enrichment_has_any_signal(en: PaperEnrichment | None) -> bool:
         return False
     if not _is_unknown(en.top_author_name):
         return True
-    if en.top_h_index > 0:
+    if en.top_h_index is not None and en.top_h_index > 0:
         return True
     if not _is_unknown(en.top_author_affiliation):
         return True
@@ -145,10 +159,11 @@ def merge_paper_enrichment(
         # stats). Kagi may have a verifiable h-index for the same person; only merge
         # h when names agree so we do not attach a senior co-author's h to someone else.
         if (
-            top_h == 0
-            and kagi.top_h_index > 0
+            (top_h is None or top_h == 0)
             and not _is_unknown(kagi.top_author_name)
             and _norm_person_name(top_name) == _norm_person_name(kagi.top_author_name)
+            and kagi.top_h_index is not None
+            and (kagi.top_h_index > 0 or top_h is None)
         ):
             top_h = kagi.top_h_index
     first = (
@@ -173,9 +188,9 @@ def merge_paper_enrichment(
     )
     return PaperEnrichment(
         top_author_name=top_name,
-        top_h_index=top_h,
         first_affiliation=first,
         last_affiliation=last,
+        top_h_index=top_h,
         top_author_affiliation=top_aff,
         author_count=ac,
     )
@@ -192,9 +207,13 @@ def format_enrichment_for_feedback_zulip(en: PaperEnrichment | None) -> str:
     if en is None or not paper_enrichment_has_any_signal(en):
         return ""
     lines: list[str] = []
-    if not _is_unknown(en.top_author_name) or en.top_h_index > 0:
+    if not _is_unknown(en.top_author_name) or (
+        en.top_h_index is not None and en.top_h_index > 0
+    ):
         name = en.top_author_name if not _is_unknown(en.top_author_name) else "Unknown"
-        lines.append(f"Highest h-index author: {name} (h-index {en.top_h_index})")
+        lines.append(
+            f"Highest h-index author: {name} (h-index {_h_index_display(en.top_h_index)})"
+        )
     if not _is_unknown(en.top_author_affiliation):
         lines.append(f"That author's affiliation: {en.top_author_affiliation}")
     return "\n".join(lines).strip()
@@ -202,14 +221,18 @@ def format_enrichment_for_feedback_zulip(en: PaperEnrichment | None) -> str:
 
 class _KagiMetadataJson(BaseModel):
     top_author_name: str = Field(default="Unknown")
-    top_author_h_index: int = Field(default=0, ge=0)
+    top_author_h_index: int | None = Field(default=None)
     top_author_institution: str = Field(default="Unknown")
     first_author_institution: str = Field(default="Unknown")
     last_author_institution: str = Field(default="Unknown")
 
     @field_validator("top_author_h_index", mode="after")
     @classmethod
-    def _cap_h_index(cls, v: int) -> int:
+    def _cap_h_index(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 0:
+            return None
         return _plausible_author_h_index(v)
 
 
@@ -218,14 +241,18 @@ class _KagiBatchPaperItem(BaseModel):
 
     paper_id: str = Field(..., min_length=1)
     top_author_name: str = Field(default="Unknown")
-    top_author_h_index: int = Field(default=0, ge=0)
+    top_author_h_index: int | None = Field(default=None)
     top_author_institution: str = Field(default="Unknown")
     first_author_institution: str = Field(default="Unknown")
     last_author_institution: str = Field(default="Unknown")
 
     @field_validator("top_author_h_index", mode="after")
     @classmethod
-    def _cap_h_index(cls, v: int) -> int:
+    def _cap_h_index(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 0:
+            return None
         return _plausible_author_h_index(v)
 
 
@@ -237,9 +264,9 @@ _METADATA_ABSTRACT_CHARS_PER_PAPER = 1800
 def _enrichment_from_kagi_metadata_json(m: _KagiMetadataJson) -> PaperEnrichment:
     return PaperEnrichment(
         top_author_name=m.top_author_name.strip() or "Unknown",
-        top_h_index=int(m.top_author_h_index),
         first_affiliation=m.first_author_institution.strip() or "Unknown",
         last_affiliation=m.last_author_institution.strip() or "Unknown",
+        top_h_index=m.top_author_h_index,
         top_author_affiliation=m.top_author_institution.strip() or "Unknown",
     )
 
@@ -279,7 +306,7 @@ Respond with ONLY a single JSON object (no markdown code fences, no other text) 
 "papers": array of {n} object(s) — one per paper above, in any order. Each object must have:
 - "paper_id": string (exactly one of the paper_id values from above)
 - "top_author_name": string (full name of the listed author with highest verifiable h-index; "Unknown" if unclear)
-- "top_author_h_index": integer >= 0 (0 if name is Unknown or h-index unknown). This must be the bibliometric **h-index** (Hirsch index: h papers with at least h citations each), NOT total citations, NOT i10-index, NOT publication count. Typical values are under 150 even for very prominent researchers.
+- "top_author_h_index": integer >= 0 when known (use ``0`` only for a verified bibliometric h-index of zero), or JSON ``null`` when the name is Unknown or the h-index cannot be verified. This must be the bibliometric **h-index** (Hirsch index: h papers with at least h citations each), NOT total citations, NOT i10-index, NOT publication count. Typical values are under 150 even for very prominent researchers.
 - "top_author_institution": string
 - "first_author_institution": string
 - "last_author_institution": string
@@ -489,15 +516,23 @@ def fetch_author_metric(author_openalex_id_url: str, mailto: str) -> AuthorMetri
     url = _authors_api_path(author_openalex_id_url)
     data = _get_json(url, mailto)
     if not data:
-        return AuthorMetric(display_name="", h_index=0)
+        return AuthorMetric(display_name="", h_index=None)
     name = str(data.get("display_name") or "").strip()
     stats = data.get("summary_stats") or {}
-    try:
-        h = int(stats.get("h_index") or 0)
-    except (TypeError, ValueError):
-        h = 0
-    h = _plausible_author_h_index(max(0, h))
-    return AuthorMetric(display_name=name or "Unknown", h_index=h)
+    h: int | None
+    if "h_index" not in stats:
+        h = None
+    else:
+        raw = stats.get("h_index")
+        if raw is None:
+            h = None
+        else:
+            try:
+                h = int(raw)
+            except (TypeError, ValueError):
+                h = None
+    plausible: int | None = None if h is None else _plausible_author_h_index(h)
+    return AuthorMetric(display_name=name or "Unknown", h_index=plausible)
 
 
 def affiliation_for_authorship(a: dict[str, Any]) -> str:
@@ -540,7 +575,7 @@ def build_enrichment_for_work(
         return None
 
     best_idx: int | None = None
-    best_metric = AuthorMetric(display_name="Unknown", h_index=-1)
+    best_metric = AuthorMetric(display_name="Unknown", h_index=None)
 
     for idx, a in enumerate(authorships):
         author = a.get("author") or {}
@@ -548,20 +583,26 @@ def build_enrichment_for_work(
         if not aid:
             continue
         aid = str(aid)
-        m = metrics_by_author_url.get(aid, AuthorMetric(display_name="Unknown", h_index=0))
+        m = metrics_by_author_url.get(
+            aid, AuthorMetric(display_name="Unknown", h_index=None)
+        )
         if best_idx is None:
             best_metric = m
             best_idx = idx
-        elif m.h_index > best_metric.h_index:
+        elif _h_index_rank(m.h_index) > _h_index_rank(best_metric.h_index):
             best_metric = m
             best_idx = idx
-        elif m.h_index == best_metric.h_index and idx < best_idx:
+        elif (
+            _h_index_rank(m.h_index) == _h_index_rank(best_metric.h_index)
+            and best_idx is not None
+            and idx < best_idx
+        ):
             best_metric = m
             best_idx = idx
 
     if best_idx is None:
         top_name = "Unknown"
-        top_h = 0
+        top_h = None
     else:
         top_name = best_metric.display_name
         top_h = best_metric.h_index
@@ -576,9 +617,9 @@ def build_enrichment_for_work(
 
     return PaperEnrichment(
         top_author_name=top_name,
-        top_h_index=top_h,
         first_affiliation=first_aff,
         last_affiliation=last_aff,
+        top_h_index=top_h,
         top_author_affiliation=top_aff,
         author_count=len(authorships),
     )
@@ -626,7 +667,7 @@ def batch_enrich_articles(
             except Exception as e:
                 aid = futs[fut]
                 logger.warning("OpenAlex author worker failed %s: %s", aid, e)
-                metrics[aid] = AuthorMetric(display_name="Unknown", h_index=0)
+                metrics[aid] = AuthorMetric(display_name="Unknown", h_index=None)
 
     out: dict[str, PaperEnrichment | None] = {}
     for art in articles:

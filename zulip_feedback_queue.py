@@ -65,11 +65,23 @@ def paper_enrichment_from_json(data: dict[str, Any] | None) -> PaperEnrichment |
             author_count = int(raw_ac)
         except (TypeError, ValueError):
             author_count = None
+    top_h: int | None
+    if "top_h_index" not in data:
+        top_h = None
+    else:
+        raw_h = data.get("top_h_index")
+        if raw_h is None:
+            top_h = None
+        else:
+            try:
+                top_h = int(raw_h)
+            except (TypeError, ValueError):
+                top_h = None
     return PaperEnrichment(
         top_author_name=str(data.get("top_author_name", "")),
-        top_h_index=int(data.get("top_h_index", 0)),
         first_affiliation=str(data.get("first_affiliation", "")),
         last_affiliation=str(data.get("last_affiliation", "")),
+        top_h_index=top_h,
         top_author_affiliation=str(data.get("top_author_affiliation", "Unknown")),
         author_count=author_count,
     )
