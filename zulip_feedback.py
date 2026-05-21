@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from api_usage import record_zulip_api
@@ -15,6 +16,19 @@ logger = logging.getLogger(__name__)
 FEEDBACK_RANKING_TOPIC = "feedback ranking"
 # Per process_group run, at most this many new messages per group (best by relevance, then impact).
 MAX_FEEDBACK_RANKING_POSTS_PER_GROUP = 2
+
+TitleLinkScore = tuple[str, str, int, int, PaperEnrichment | None]
+
+
+@dataclass
+class GroupFeedbackCandidates:
+    """Passing papers eligible for Zulip feedback ranking from one config group."""
+
+    group_name: str
+    zulip_sources: list[dict[str, Any]]
+    messages_by_pair: dict[tuple[str, str], list[dict[str, Any]]]
+    title_link_scores: list[TitleLinkScore]
+    single_author_impact_penalty: int = 1
 _LINK_LINE = re.compile(r"(?im)^\s*Link:\s*(.+?)\s*$")
 
 
@@ -160,8 +174,40 @@ def _impact_for_feedback_ranking(
     return impact
 
 
+def winning_group_by_link(
+    batches: list[GroupFeedbackCandidates],
+) -> dict[str, str]:
+    """Map normalized link -> group that should post it (highest relevance, then impact)."""
+    best: dict[str, tuple[int, int, str]] = {}
+    for batch in batches:
+        for _title, link, rel, imp, _en in batch.title_link_scores:
+            k = normalize_link(link)
+            cur = best.get(k)
+            if cur is None:
+                best[k] = (rel, imp, batch.group_name)
+                continue
+            if rel > cur[0] or (rel == cur[0] and imp > cur[1]):
+                best[k] = (rel, imp, batch.group_name)
+            elif rel == cur[0] and imp == cur[1] and batch.group_name < cur[2]:
+                best[k] = (rel, imp, batch.group_name)
+    return {k: v[2] for k, v in best.items()}
+
+
+def filter_to_group_winning_links(
+    batch: GroupFeedbackCandidates,
+    winners: dict[str, str],
+) -> list[TitleLinkScore]:
+    """Keep only rows whose link this group won in ``winning_group_by_link``."""
+    gn = batch.group_name
+    return [
+        row
+        for row in batch.title_link_scores
+        if winners.get(normalize_link(row[1])) == gn
+    ]
+
+
 def select_top_ranked_for_feedback_posts(
-    title_link_scores: list[tuple[str, str, int, int, PaperEnrichment | None]],
+    title_link_scores: list[TitleLinkScore],
     *,
     max_posts: int = MAX_FEEDBACK_RANKING_POSTS_PER_GROUP,
     single_author_impact_penalty: int = 1,

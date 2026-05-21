@@ -33,10 +33,13 @@ from kagi_quota import (
 from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history, normalize_link
 from zulip_context import build_zulip_context_and_messages, load_zulip_realms
 from zulip_feedback import (
+    GroupFeedbackCandidates,
+    filter_to_group_winning_links,
     format_feedback_prompt_snippet,
     load_feedback_state_for_group,
     post_feedback_ranking_for_new_items,
     select_top_ranked_for_feedback_posts,
+    winning_group_by_link,
 )
 from zulip_feedback_queue import (
     dispatch_feedback_ranking_queue_once,
@@ -225,6 +228,55 @@ def make_kagi_client(kagi_table: dict) -> KagiClient:
     )
 
 
+def _dispatch_group_feedback_posts(
+    batch: GroupFeedbackCandidates,
+    config_path: Path,
+    zulip_cfg: dict,
+    zulip_realms: dict,
+    dryrun: bool,
+    *,
+    single_author_impact_penalty: int,
+) -> None:
+    """Post or enqueue up to two feedback-ranking messages for one group."""
+    feedback_post_links = select_top_ranked_for_feedback_posts(
+        batch.title_link_scores,
+        single_author_impact_penalty=single_author_impact_penalty,
+    )
+    if not feedback_post_links:
+        return
+    use_queue = bool(zulip_cfg.get("feedback_ranking_use_queue"))
+    if use_queue:
+        logger.info(
+            "Zulip feedback ranking: queuing up to %d article(s) for group %s "
+            "(hourly dispatch via --dispatch-feedback-queue)",
+            len(feedback_post_links),
+            batch.group_name,
+        )
+        enqueue_feedback_ranking_for_group(
+            config_path,
+            zulip_cfg,
+            batch.zulip_sources,
+            batch.messages_by_pair,
+            feedback_post_links,
+            group_name=batch.group_name,
+            dryrun=dryrun,
+        )
+    else:
+        logger.info(
+            "Zulip feedback ranking: posting up to %d article(s) for group %s "
+            "(by relevance, impact)",
+            len(feedback_post_links),
+            batch.group_name,
+        )
+        post_feedback_ranking_for_new_items(
+            batch.zulip_sources,
+            zulip_realms,
+            messages_by_pair=batch.messages_by_pair,
+            titles_and_links=feedback_post_links,
+            dryrun=dryrun,
+        )
+
+
 def process_group(
     group: dict,
     kagi: KagiClient,
@@ -236,7 +288,7 @@ def process_group(
     *,
     kagi_prefilter_cap: int = 20,
     kagi_batch_size: int = 5,
-) -> None:
+) -> GroupFeedbackCandidates | None:
     rss_path = group["rss_path"]
     feed_link = str(group.get("feed_link", "myserver"))
     period = group["period"]
@@ -421,10 +473,13 @@ def process_group(
             )
         )
 
+    feedback_batch: GroupFeedbackCandidates | None = None
     if zulip_sources and zulip_realms and passing:
-        fb_penalty = max(0, int(group.get("single_author_impact_penalty", 1)))
-        feedback_post_links = select_top_ranked_for_feedback_posts(
-            [
+        feedback_batch = GroupFeedbackCandidates(
+            group_name=group_name,
+            zulip_sources=zulip_sources,
+            messages_by_pair=feedback_msgs_by_pair,
+            title_link_scores=[
                 (
                     a.title,
                     str(a.link),
@@ -434,40 +489,10 @@ def process_group(
                 )
                 for a, r in passing
             ],
-            single_author_impact_penalty=fb_penalty,
+            single_author_impact_penalty=max(
+                0, int(group.get("single_author_impact_penalty", 1))
+            ),
         )
-        if feedback_post_links:
-            use_queue = bool(zulip_cfg.get("feedback_ranking_use_queue"))
-            if use_queue:
-                logger.info(
-                    "Zulip feedback ranking: queuing up to %d article(s) for group %s "
-                    "(hourly dispatch via --dispatch-feedback-queue)",
-                    len(feedback_post_links),
-                    group_name,
-                )
-                enqueue_feedback_ranking_for_group(
-                    config_path,
-                    zulip_cfg,
-                    zulip_sources,
-                    feedback_msgs_by_pair,
-                    feedback_post_links,
-                    group_name=group_name,
-                    dryrun=dryrun,
-                )
-            else:
-                logger.info(
-                    "Zulip feedback ranking: posting up to %d article(s) for group %s "
-                    "(by relevance, impact)",
-                    len(feedback_post_links),
-                    group_name,
-                )
-                post_feedback_ranking_for_new_items(
-                    zulip_sources,
-                    zulip_realms,
-                    messages_by_pair=feedback_msgs_by_pair,
-                    titles_and_links=feedback_post_links,
-                    dryrun=dryrun,
-                )
 
     n_scored = len(recent_articles)
     n_new_this_run = len(new_items)
@@ -512,6 +537,8 @@ def process_group(
             f"threshold this run ({rss_path} unchanged)"
         )
 
+    return feedback_batch
+
 
 def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
     reset_api_usage_stats()
@@ -547,9 +574,10 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         # Per-group index -> untracked venues from that group's Zulip pulls (for config.toml updates).
         suggestions_by_group_idx: dict[int, dict[str, dict[str, VenueBucket]]] = {}
         zulip_plain_block_by_group_idx: dict[int, str] = {}
+        feedback_batches: list[GroupFeedbackCandidates] = []
         for gi, group in enumerate(groups):
             print(f"--- Group: {group['name']} ---")
-            process_group(
+            batch = process_group(
                 group,
                 kagi,
                 zulip_realms,
@@ -560,6 +588,8 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 kagi_prefilter_cap=pf_cap,
                 kagi_batch_size=batch_sz,
             )
+            if batch is not None:
+                feedback_batches.append(batch)
 
             zulip_sources = group.get("zulip_sources") or []
             if not zulip_sources or not zulip_realms:
@@ -587,6 +617,32 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 continue
             dest = suggestions_by_group_idx.setdefault(gi, {})
             merge_journal_suggestion_maps(dest, missing_nested)
+
+        if feedback_batches:
+            link_winners = winning_group_by_link(feedback_batches)
+            for batch in feedback_batches:
+                before = len(batch.title_link_scores)
+                batch.title_link_scores = filter_to_group_winning_links(
+                    batch, link_winners
+                )
+                dropped = before - len(batch.title_link_scores)
+                if dropped:
+                    logger.info(
+                        "[%s] cross-group dedup: %d paper(s) assigned to another group "
+                        "(higher relevance)",
+                        batch.group_name,
+                        dropped,
+                    )
+                if not batch.title_link_scores:
+                    continue
+                _dispatch_group_feedback_posts(
+                    batch,
+                    config_path,
+                    zulip_cfg,
+                    zulip_realms,
+                    dryrun,
+                    single_author_impact_penalty=batch.single_author_impact_penalty,
+                )
 
         # One Kagi journal-domain filter for the run, then merge feeds + curated lists into config.toml.
         if suggestions_by_group_idx and kagi:
