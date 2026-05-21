@@ -1,6 +1,6 @@
 import unittest
 
-from rss_merge import normalize_link
+from rss_merge import GroupPassingScores, normalize_link, winning_group_by_link
 
 from openalex_enrich import PaperEnrichment
 from zulip_feedback import (
@@ -16,7 +16,6 @@ from zulip_feedback import (
     parse_feedback_link_from_body,
     select_top_ranked_for_feedback_posts,
     unique_realm_stream_pairs,
-    winning_group_by_link,
 )
 
 
@@ -215,71 +214,47 @@ class TestSelectTopRankedForFeedback(unittest.TestCase):
 class TestCrossGroupFeedbackDedup(unittest.TestCase):
     def test_link_goes_to_highest_relevance_group(self) -> None:
         url = "https://arxiv.org/abs/2401.00099"
-        batches = [
-            GroupFeedbackCandidates(
-                group_name="alpha",
-                zulip_sources=[],
-                messages_by_pair={},
-                title_link_scores=[("P", url, 7, 8, None)],
-            ),
-            GroupFeedbackCandidates(
-                group_name="beta",
-                zulip_sources=[],
-                messages_by_pair={},
-                title_link_scores=[("P", url, 9, 3, None)],
-            ),
-        ]
-        winners = winning_group_by_link(batches)
+        winners = winning_group_by_link(
+            [
+                GroupPassingScores("alpha", [(url, 7, 8)]),
+                GroupPassingScores("beta", [(url, 9, 3)]),
+            ]
+        )
         self.assertEqual(winners[normalize_link(url)], "beta")
-        alpha_rows = filter_to_group_winning_links(batches[0], winners)
-        beta_rows = filter_to_group_winning_links(batches[1], winners)
-        self.assertEqual(alpha_rows, [])
-        self.assertEqual(len(beta_rows), 1)
+        fb_alpha = GroupFeedbackCandidates(
+            group_name="alpha",
+            zulip_sources=[],
+            messages_by_pair={},
+            title_link_scores=[("P", url, 7, 8, None)],
+        )
+        fb_beta = GroupFeedbackCandidates(
+            group_name="beta",
+            zulip_sources=[],
+            messages_by_pair={},
+            title_link_scores=[("P", url, 9, 3, None)],
+        )
+        self.assertEqual(filter_to_group_winning_links(fb_alpha, winners), [])
+        self.assertEqual(len(filter_to_group_winning_links(fb_beta, winners)), 1)
 
     def test_tie_breaks_on_impact_then_group_name(self) -> None:
         url = "https://arxiv.org/abs/2401.00100"
-        batches = [
-            GroupFeedbackCandidates(
-                group_name="zulu",
-                zulip_sources=[],
-                messages_by_pair={},
-                title_link_scores=[("P", url, 8, 5, None)],
-            ),
-            GroupFeedbackCandidates(
-                group_name="alpha",
-                zulip_sources=[],
-                messages_by_pair={},
-                title_link_scores=[("P", url, 8, 9, None)],
-            ),
-            GroupFeedbackCandidates(
-                group_name="mike",
-                zulip_sources=[],
-                messages_by_pair={},
-                title_link_scores=[("P", url, 8, 9, None)],
-            ),
-        ]
-        winners = winning_group_by_link(batches)
+        winners = winning_group_by_link(
+            [
+                GroupPassingScores("zulu", [(url, 8, 5)]),
+                GroupPassingScores("alpha", [(url, 8, 9)]),
+                GroupPassingScores("mike", [(url, 8, 9)]),
+            ]
+        )
         self.assertEqual(winners[normalize_link(url)], "alpha")
 
     def test_different_links_each_group_keeps_own(self) -> None:
-        batches = [
-            GroupFeedbackCandidates(
-                group_name="g1",
-                zulip_sources=[],
-                messages_by_pair={},
-                title_link_scores=[("A", "https://a.org/1", 9, 9, None)],
-            ),
-            GroupFeedbackCandidates(
-                group_name="g2",
-                zulip_sources=[],
-                messages_by_pair={},
-                title_link_scores=[("B", "https://a.org/2", 9, 9, None)],
-            ),
-        ]
-        winners = winning_group_by_link(batches)
+        winners = winning_group_by_link(
+            [
+                GroupPassingScores("g1", [("https://a.org/1", 9, 9)]),
+                GroupPassingScores("g2", [("https://a.org/2", 9, 9)]),
+            ]
+        )
         self.assertEqual(len(winners), 2)
-        self.assertEqual(len(filter_to_group_winning_links(batches[0], winners)), 1)
-        self.assertEqual(len(filter_to_group_winning_links(batches[1], winners)), 1)
 
 
 class TestZulipFeedbackPrompt(unittest.TestCase):

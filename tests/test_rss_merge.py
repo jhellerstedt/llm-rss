@@ -5,10 +5,44 @@ from tempfile import TemporaryDirectory
 
 from rss_merge import (
     FeedItem,
+    GroupPassingScores,
+    filter_feed_items_for_group,
     load_persisted_feed_items,
     merge_feed_history,
     normalize_link,
+    winning_group_by_link,
 )
+
+
+class TestCrossGroupRssDedup(unittest.TestCase):
+    def _item(self, link: str) -> FeedItem:
+        return FeedItem(
+            title="T",
+            link=link,
+            description="d",
+            pubdate=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            unique_id=link,
+        )
+
+    def test_removes_link_from_losing_group_feed(self) -> None:
+        url = "https://arxiv.org/abs/2401.00099"
+        winners = winning_group_by_link(
+            [
+                GroupPassingScores("alpha", [(url, 7, 8)]),
+                GroupPassingScores("beta", [(url, 9, 3)]),
+            ]
+        )
+        items = [self._item(url)]
+        kept_alpha = filter_feed_items_for_group(items, "alpha", winners)
+        kept_beta = filter_feed_items_for_group(items, "beta", winners)
+        self.assertEqual(kept_alpha, [])
+        self.assertEqual(len(kept_beta), 1)
+
+    def test_uncontested_persisted_link_stays(self) -> None:
+        url = "https://arxiv.org/abs/old"
+        items = [self._item(url)]
+        kept = filter_feed_items_for_group(items, "alpha", {})
+        self.assertEqual(len(kept), 1)
 
 
 class TestRssMerge(unittest.TestCase):

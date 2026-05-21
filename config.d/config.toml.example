@@ -75,7 +75,8 @@ impact_threshold = 3
 # When zulip_sources is set, the bot also posts at most two Zulip messages per group run
 # total (the two highest-ranked passing papers by relevance then impact; skips links already
 # present in each stream's "feedback ranking" topic). The same paper URL in multiple [[groups]]
-# is posted only once per run: the group where it scored highest on relevance (then impact).
+# appears in only one group's RSS feed and at most one feedback-ranking post per run—the group
+# where it scored highest on relevance (then impact).
 # If you list multiple realm/stream rows,
 # the budget is shared across them (earlier rows in config order are tried first). Those
 # messages live on each row's realm+stream under topic "feedback ranking"; :thumbs_up: /

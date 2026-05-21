@@ -174,25 +174,6 @@ def _impact_for_feedback_ranking(
     return impact
 
 
-def winning_group_by_link(
-    batches: list[GroupFeedbackCandidates],
-) -> dict[str, str]:
-    """Map normalized link -> group that should post it (highest relevance, then impact)."""
-    best: dict[str, tuple[int, int, str]] = {}
-    for batch in batches:
-        for _title, link, rel, imp, _en in batch.title_link_scores:
-            k = normalize_link(link)
-            cur = best.get(k)
-            if cur is None:
-                best[k] = (rel, imp, batch.group_name)
-                continue
-            if rel > cur[0] or (rel == cur[0] and imp > cur[1]):
-                best[k] = (rel, imp, batch.group_name)
-            elif rel == cur[0] and imp == cur[1] and batch.group_name < cur[2]:
-                best[k] = (rel, imp, batch.group_name)
-    return {k: v[2] for k, v in best.items()}
-
-
 def filter_to_group_winning_links(
     batch: GroupFeedbackCandidates,
     winners: dict[str, str],
@@ -202,7 +183,7 @@ def filter_to_group_winning_links(
     return [
         row
         for row in batch.title_link_scores
-        if winners.get(normalize_link(row[1])) == gn
+        if winners.get(normalize_link(row[1]), gn) == gn
     ]
 
 

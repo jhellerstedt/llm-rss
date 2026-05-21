@@ -23,11 +23,52 @@ class FeedItem:
     unique_id: str
 
 
+LinkScore = tuple[str, int, int]  # link, relevance, impact
+
+
+@dataclass
+class GroupPassingScores:
+    """Passing papers from one config group, for cross-group link assignment."""
+
+    group_name: str
+    link_scores: list[LinkScore]
+
+
 def normalize_link(url: str) -> str:
     u = urlparse(url.strip())
     host = u.netloc.lower()
     path = (u.path or "/").rstrip("/") or "/"
     return urlunparse((u.scheme.lower(), host, path, "", u.query, ""))
+
+
+def winning_group_by_link(batches: list[GroupPassingScores]) -> dict[str, str]:
+    """Map normalized link -> group that owns it (highest relevance, then impact)."""
+    best: dict[str, tuple[int, int, str]] = {}
+    for batch in batches:
+        for link, rel, imp in batch.link_scores:
+            k = normalize_link(link)
+            cur = best.get(k)
+            if cur is None:
+                best[k] = (rel, imp, batch.group_name)
+                continue
+            if rel > cur[0] or (rel == cur[0] and imp > cur[1]):
+                best[k] = (rel, imp, batch.group_name)
+            elif rel == cur[0] and imp == cur[1] and batch.group_name < cur[2]:
+                best[k] = (rel, imp, batch.group_name)
+    return {k: v[2] for k, v in best.items()}
+
+
+def filter_feed_items_for_group(
+    items: list[FeedItem],
+    group_name: str,
+    winners: dict[str, str],
+) -> list[FeedItem]:
+    """Keep items this group owns; drop links assigned to another group this run."""
+    return [
+        item
+        for item in items
+        if winners.get(normalize_link(item.link), group_name) == group_name
+    ]
 
 
 def _entry_pubdate(entry: feedparser.FeedParserDict) -> datetime | None:

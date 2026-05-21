@@ -68,6 +68,7 @@ If you use `feedback_ranking_use_queue`, add a separate hourly (or other interva
 ## Output (RSS XML files)
 
 - Each `[[groups]]` entry has an `rss_path` (for example `data/quantum_computing.xml`). That is the only file this group updates.
+- If the same paper URL passes thresholds in multiple groups in one run, it is kept only in the group where it scored highest on relevance (then impact); other groups drop it from new items and from persisted history for that run.
 - **XML is written only when** the group has at least one article that passes the LLM filters: `relevance > relevance_threshold` **and** `impact > impact_threshold`. Otherwise the run **does not overwrite** that path (any previous file on disk is left as-is).
 - Console messages:
   - `Wrote N items to …` — a new RSS file was written (or replaced).

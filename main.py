@@ -1,6 +1,7 @@
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -30,7 +31,15 @@ from kagi_quota import (
     remaining_kagi_invocations,
     reset_kagi_session_quota,
 )
-from rss_merge import FeedItem, load_persisted_feed_items, merge_feed_history, normalize_link
+from rss_merge import (
+    FeedItem,
+    GroupPassingScores,
+    filter_feed_items_for_group,
+    load_persisted_feed_items,
+    merge_feed_history,
+    normalize_link,
+    winning_group_by_link,
+)
 from zulip_context import build_zulip_context_and_messages, load_zulip_realms
 from zulip_feedback import (
     GroupFeedbackCandidates,
@@ -39,7 +48,6 @@ from zulip_feedback import (
     load_feedback_state_for_group,
     post_feedback_ranking_for_new_items,
     select_top_ranked_for_feedback_posts,
-    winning_group_by_link,
 )
 from zulip_feedback_queue import (
     dispatch_feedback_ranking_queue_once,
@@ -228,6 +236,64 @@ def make_kagi_client(kagi_table: dict) -> KagiClient:
     )
 
 
+@dataclass
+class GroupRunResult:
+    group_name: str
+    rss_path: str
+    feed_link: str
+    feed_category: str | None
+    rss_max_items: int
+    new_items: list[FeedItem]
+    n_scored: int
+    link_scores: list[tuple[str, int, int]]
+    feedback: GroupFeedbackCandidates | None
+
+
+def _write_group_rss(
+    run: GroupRunResult,
+    merged: list[FeedItem],
+    dryrun: bool,
+    *,
+    n_new_this_run: int,
+) -> None:
+    n_kept = len(merged)
+    if n_kept > 0 and not dryrun:
+        rss_path = Path(run.rss_path)
+        rss_path.parent.mkdir(parents=True, exist_ok=True)
+        feed_title = run.group_name.replace("_", " ").strip().title()
+        new_feed = Rss201rev2Feed(
+            title=feed_title,
+            link=run.feed_link,
+            description=_format_feed_description(run.group_name, run.feed_category),
+            language="en",
+        )
+        for item in merged:
+            new_feed.add_item(
+                title=item.title,
+                link=item.link,
+                description=item.description,
+                pubdate=item.pubdate,
+                unique_id=item.unique_id,
+            )
+        with open(rss_path, "w", encoding="utf-8") as f:
+            new_feed.write(f, "utf-8")
+        print(
+            f"Wrote {n_kept} item(s) to {run.rss_path} "
+            f"({n_new_this_run} passed threshold this run, cap={run.rss_max_items})"
+        )
+    elif dryrun:
+        print(
+            f"[{run.group_name}] dry run — would write {n_kept} item(s) to {run.rss_path} "
+            f"({n_new_this_run} passed threshold this run, scored {run.n_scored} in period, "
+            f"cap={run.rss_max_items})"
+        )
+    elif n_kept == 0:
+        print(
+            f"[{run.group_name}] no XML written — no persisted items and nothing passed "
+            f"threshold this run ({run.rss_path} unchanged)"
+        )
+
+
 def _dispatch_group_feedback_posts(
     batch: GroupFeedbackCandidates,
     config_path: Path,
@@ -288,7 +354,7 @@ def process_group(
     *,
     kagi_prefilter_cap: int = 20,
     kagi_batch_size: int = 5,
-) -> GroupFeedbackCandidates | None:
+) -> GroupRunResult:
     rss_path = group["rss_path"]
     feed_link = str(group.get("feed_link", "myserver"))
     period = group["period"]
@@ -494,50 +560,19 @@ def process_group(
             ),
         )
 
-    n_scored = len(recent_articles)
-    n_new_this_run = len(new_items)
-    persisted = load_persisted_feed_items(Path(rss_path))
-    merged = merge_feed_history(persisted, new_items, rss_max_items)
-    n_kept = len(merged)
+    link_scores = [(str(a.link), r.relevance, r.impact) for a, r in passing]
 
-    feed_title = group_name.replace("_", " ").strip().title()
-    feed_category = group.get("feed_category")
-    new_feed = Rss201rev2Feed(
-        title=feed_title,
-        link=feed_link,
-        description=_format_feed_description(group_name, feed_category),
-        language="en",
+    return GroupRunResult(
+        group_name=group_name,
+        rss_path=rss_path,
+        feed_link=feed_link,
+        feed_category=group.get("feed_category"),
+        rss_max_items=rss_max_items,
+        new_items=new_items,
+        n_scored=len(recent_articles),
+        link_scores=link_scores,
+        feedback=feedback_batch,
     )
-    for item in merged:
-        new_feed.add_item(
-            title=item.title,
-            link=item.link,
-            description=item.description,
-            pubdate=item.pubdate,
-            unique_id=item.unique_id,
-        )
-
-    if n_kept > 0 and not dryrun:
-        Path(rss_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(rss_path, "w", encoding="utf-8") as f:
-            new_feed.write(f, "utf-8")
-        print(
-            f"Wrote {n_kept} item(s) to {rss_path} "
-            f"({n_new_this_run} passed threshold this run, cap={rss_max_items})"
-        )
-    elif dryrun:
-        print(
-            f"[{group_name}] dry run — would write {n_kept} item(s) to {rss_path} "
-            f"({n_new_this_run} passed threshold this run, scored {n_scored} in period, "
-            f"cap={rss_max_items})"
-        )
-    elif n_kept == 0:
-        print(
-            f"[{group_name}] no XML written — no persisted items and nothing passed "
-            f"threshold this run ({rss_path} unchanged)"
-        )
-
-    return feedback_batch
 
 
 def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
@@ -574,22 +609,22 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         # Per-group index -> untracked venues from that group's Zulip pulls (for config.toml updates).
         suggestions_by_group_idx: dict[int, dict[str, dict[str, VenueBucket]]] = {}
         zulip_plain_block_by_group_idx: dict[int, str] = {}
-        feedback_batches: list[GroupFeedbackCandidates] = []
+        group_runs: list[GroupRunResult] = []
         for gi, group in enumerate(groups):
             print(f"--- Group: {group['name']} ---")
-            batch = process_group(
-                group,
-                kagi,
-                zulip_realms,
-                zulip_cfg,
-                openalex_cfg,
-                dryrun,
-                config_path,
-                kagi_prefilter_cap=pf_cap,
-                kagi_batch_size=batch_sz,
+            group_runs.append(
+                process_group(
+                    group,
+                    kagi,
+                    zulip_realms,
+                    zulip_cfg,
+                    openalex_cfg,
+                    dryrun,
+                    config_path,
+                    kagi_prefilter_cap=pf_cap,
+                    kagi_batch_size=batch_sz,
+                )
             )
-            if batch is not None:
-                feedback_batches.append(batch)
 
             zulip_sources = group.get("zulip_sources") or []
             if not zulip_sources or not zulip_realms:
@@ -618,8 +653,40 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
             dest = suggestions_by_group_idx.setdefault(gi, {})
             merge_journal_suggestion_maps(dest, missing_nested)
 
+        passing_batches = [
+            GroupPassingScores(r.group_name, r.link_scores)
+            for r in group_runs
+            if r.link_scores
+        ]
+        link_winners = (
+            winning_group_by_link(passing_batches) if passing_batches else {}
+        )
+
+        for run in group_runs:
+            persisted = load_persisted_feed_items(Path(run.rss_path))
+            n_persisted_before = len(persisted)
+            n_new_before = len(run.new_items)
+            persisted = filter_feed_items_for_group(
+                persisted, run.group_name, link_winners
+            )
+            new_items = filter_feed_items_for_group(
+                run.new_items, run.group_name, link_winners
+            )
+            dropped = (n_persisted_before - len(persisted)) + (
+                n_new_before - len(new_items)
+            )
+            if dropped:
+                logger.info(
+                    "[%s] cross-group RSS dedup: %d paper(s) kept in another group's feed "
+                    "(higher relevance)",
+                    run.group_name,
+                    dropped,
+                )
+            merged = merge_feed_history(persisted, new_items, run.rss_max_items)
+            _write_group_rss(run, merged, dryrun, n_new_this_run=len(new_items))
+
+        feedback_batches = [r.feedback for r in group_runs if r.feedback]
         if feedback_batches:
-            link_winners = winning_group_by_link(feedback_batches)
             for batch in feedback_batches:
                 before = len(batch.title_link_scores)
                 batch.title_link_scores = filter_to_group_winning_links(
