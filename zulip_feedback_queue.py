@@ -14,6 +14,7 @@ from rss_merge import normalize_link
 from zulip_context import fetch_messages_narrow, _client_for_realm
 from zulip_feedback import (
     FEEDBACK_RANKING_TOPIC,
+    feedback_ranking_ready_for_next_post,
     format_feedback_post_body,
     links_announced_in_messages,
     lookback_max_for_pair,
@@ -299,6 +300,14 @@ def dispatch_feedback_ranking_queue_once(
                 by_pair[(realm, stream)] = pending[1:]
                 logger.info(
                     "Feedback queue: dropped stale head (already in topic) realm=%s stream=%s",
+                    realm,
+                    stream,
+                )
+                continue
+            if not feedback_ranking_ready_for_next_post(msgs):
+                logger.info(
+                    "Feedback queue: waiting for reaction on previous post "
+                    "realm=%s stream=%s",
                     realm,
                     stream,
                 )

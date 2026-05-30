@@ -32,7 +32,7 @@ LLM-RSS reads titles and abstracts from science RSS feeds (Nature, arXiv, APS, a
    - Point `[zulip] realms_config_file` at that JSON (paths relative to the config TOML’s directory, e.g. `config.d/zulip_realms.json`), or place `zulip_realms.json` next to the TOML / working directory, or set `ZULIP_REALMS_CONFIG_FILE`.
    - Per group, set `zulip_sources` to a list of tables: `realm`, `stream`, optional `topic`, `lookback_hours`, `max_messages`.
    - If raw context exceeds `context_max_chars`, the tool calls Kagi’s **Universal Summarizer** with engine `muriel` (Research) once to compress it before scoring.
-   - **Feedback ranking queue (optional):** set `[zulip] feedback_ranking_use_queue = true` so top-scoring papers are written to a JSON queue (`<config-stem>.feedback_ranking_queue.json` beside that TOML, unless you set `feedback_ranking_queue_file`). The normal feed run does not sleep; schedule a short second job to post at most one queued item per stream per run, for example hourly:
+   - **Feedback ranking queue (optional):** set `[zulip] feedback_ranking_use_queue = true` so top-scoring papers are written to a JSON queue (`<config-stem>.feedback_ranking_queue.json` beside that TOML, unless you set `feedback_ranking_queue_file`). The normal feed run does not sleep; schedule a short second job to post at most one queued item per stream per run (only after the latest post in that topic has a `:thumbs_up:` or `:thumbs_down:` reaction), for example hourly:
      ```bash
      0 * * * * cd /path/to/llm-rss && /path/to/.venv/bin/python main.py --dispatch-feedback-queue --config-path config.d/config.toml
      ```

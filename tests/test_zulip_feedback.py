@@ -7,9 +7,11 @@ from zulip_feedback import (
     GroupFeedbackCandidates,
     aggregate_feedback_signals,
     count_thumbs_reactions,
+    feedback_ranking_ready_for_next_post,
     filter_to_group_winning_links,
     format_feedback_post_body,
     format_feedback_prompt_snippet,
+    latest_feedback_ranking_message,
     links_announced_in_messages,
     lookback_max_for_pair,
     merge_signal_maps,
@@ -102,6 +104,33 @@ class TestZulipFeedbackAggregate(unittest.TestCase):
         url = "https://nature.com/nature/articles/s41467-020-19000-0"
         msgs = [{"content": f"T\n\nLink: {url}"}]
         self.assertEqual(links_announced_in_messages(msgs), {normalize_link(url)})
+
+    def test_latest_feedback_ranking_message(self) -> None:
+        u1 = "https://arxiv.org/abs/2401.00001"
+        u2 = "https://arxiv.org/abs/2401.00002"
+        msgs = [
+            {"content": f"A\n\nLink: {u1}", "timestamp": 1},
+            {"content": "chat without link", "timestamp": 2},
+            {"content": f"B\n\nLink: {u2}", "timestamp": 3},
+        ]
+        latest = latest_feedback_ranking_message(msgs)
+        self.assertIsNotNone(latest)
+        self.assertEqual(
+            parse_feedback_link_from_body(str(latest.get("content"))), u2
+        )
+
+    def test_feedback_ranking_ready_for_next_post(self) -> None:
+        url = "https://arxiv.org/abs/2401.00003"
+        self.assertTrue(feedback_ranking_ready_for_next_post([]))
+        no_rx = [{"content": f"P\n\nLink: {url}", "reactions": []}]
+        self.assertFalse(feedback_ranking_ready_for_next_post(no_rx))
+        with_rx = [
+            {
+                "content": f"P\n\nLink: {url}",
+                "reactions": [{"emoji_name": "thumbs_up", "user_id": 1}],
+            }
+        ]
+        self.assertTrue(feedback_ranking_ready_for_next_post(with_rx))
 
     def test_merge_signal_maps(self) -> None:
         kx = normalize_link("https://x.org/foo")

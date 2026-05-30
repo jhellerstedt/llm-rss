@@ -118,6 +118,25 @@ def links_announced_in_messages(messages: list[dict[str, Any]]) -> set[str]:
     return keys
 
 
+def latest_feedback_ranking_message(
+    messages: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Most recent message in the topic whose body contains a feedback ``Link:`` line."""
+    for msg in reversed(messages):
+        if parse_feedback_link_from_body(str(msg.get("content") or "")):
+            return msg
+    return None
+
+
+def feedback_ranking_ready_for_next_post(messages: list[dict[str, Any]]) -> bool:
+    """True when there is no prior feedback post, or the latest one has a thumbs reaction."""
+    latest = latest_feedback_ranking_message(messages)
+    if latest is None:
+        return True
+    up, down = count_thumbs_reactions(latest)
+    return (up + down) > 0
+
+
 def merge_signal_maps(
     a: dict[str, tuple[int, int]], b: dict[str, tuple[int, int]]
 ) -> dict[str, tuple[int, int]]:

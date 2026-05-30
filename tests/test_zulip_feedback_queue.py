@@ -229,6 +229,95 @@ class TestDispatchQueue(unittest.TestCase):
         self.assertEqual(len(after["queues"][0]["pending"]), 1)
         self.assertIn("2401.00005", after["queues"][0]["pending"][0]["link"])
 
+    def test_waits_for_reaction_on_previous_post(self) -> None:
+        prev_url = "https://arxiv.org/abs/2401.00010"
+        next_url = "https://arxiv.org/abs/2401.00011"
+        qpath = feedback_ranking_queue_path(self.cfg_path, {})
+        doc = {
+            "version": 1,
+            "queues": [
+                {
+                    "realm": "r1",
+                    "stream": "general",
+                    "pending": [
+                        {"title": "Next", "link": next_url, "enrichment": None},
+                    ],
+                }
+            ],
+        }
+        qpath.write_text(json.dumps(doc), encoding="utf-8")
+        cfg = {
+            "groups": [
+                {
+                    "zulip_sources": [
+                        {"realm": "R1", "stream": "general", "lookback_hours": 24}
+                    ]
+                }
+            ]
+        }
+        topic_msgs = [
+            {"content": f"Prev\n\nLink: {prev_url}", "reactions": [], "timestamp": 1},
+        ]
+        fake_client = MagicMock()
+        with patch(
+            "zulip_feedback_queue.fetch_messages_narrow", return_value=topic_msgs
+        ), patch(
+            "zulip_feedback_queue._client_for_realm", return_value=fake_client
+        ):
+            dispatch_feedback_ranking_queue_once(
+                self.cfg_path, cfg, {"r1": {}}, dryrun=False
+            )
+        fake_client.send_message.assert_not_called()
+        after = json.loads(qpath.read_text(encoding="utf-8"))
+        self.assertEqual(len(after["queues"][0]["pending"]), 1)
+
+    def test_posts_when_previous_has_reaction(self) -> None:
+        prev_url = "https://arxiv.org/abs/2401.00012"
+        next_url = "https://arxiv.org/abs/2401.00013"
+        qpath = feedback_ranking_queue_path(self.cfg_path, {})
+        doc = {
+            "version": 1,
+            "queues": [
+                {
+                    "realm": "r1",
+                    "stream": "general",
+                    "pending": [
+                        {"title": "Next", "link": next_url, "enrichment": None},
+                    ],
+                }
+            ],
+        }
+        qpath.write_text(json.dumps(doc), encoding="utf-8")
+        cfg = {
+            "groups": [
+                {
+                    "zulip_sources": [
+                        {"realm": "R1", "stream": "general", "lookback_hours": 24}
+                    ]
+                }
+            ]
+        }
+        topic_msgs = [
+            {
+                "content": f"Prev\n\nLink: {prev_url}",
+                "reactions": [{"emoji_name": "thumbs_down", "user_id": 2}],
+                "timestamp": 1,
+            },
+        ]
+        fake_client = MagicMock()
+        fake_client.send_message.return_value = {"result": "success"}
+        with patch(
+            "zulip_feedback_queue.fetch_messages_narrow", return_value=topic_msgs
+        ), patch(
+            "zulip_feedback_queue._client_for_realm", return_value=fake_client
+        ):
+            dispatch_feedback_ranking_queue_once(
+                self.cfg_path, cfg, {"r1": {}}, dryrun=False
+            )
+        fake_client.send_message.assert_called_once()
+        after = json.loads(qpath.read_text(encoding="utf-8"))
+        self.assertEqual(after["queues"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
