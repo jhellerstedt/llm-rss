@@ -300,7 +300,7 @@ class TestDispatchQueue(unittest.TestCase):
         topic_msgs = [
             {
                 "content": f"Prev\n\nLink: {prev_url}",
-                "reactions": [{"emoji_name": "thumbs_down", "user_id": 2}],
+                "reactions": [{"emoji_name": "+1", "user_id": 2}],
                 "timestamp": 1,
             },
         ]

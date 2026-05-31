@@ -78,6 +78,23 @@ class TestZulipFeedbackReactions(unittest.TestCase):
         }
         self.assertEqual(count_thumbs_reactions(msg), (2, 1))
 
+    def test_count_thumbs_zulip_canonical_names(self) -> None:
+        msg = {
+            "reactions": [
+                {"emoji_name": "+1", "emoji_code": "1f44d", "user_id": 1},
+                {"emoji_name": "-1", "emoji_code": "1f44e", "user_id": 2},
+            ]
+        }
+        self.assertEqual(count_thumbs_reactions(msg), (1, 1))
+
+    def test_count_thumbs_emoji_code_only(self) -> None:
+        msg = {
+            "reactions": [
+                {"emoji_code": "1f44d-1f3fc", "user_id": 1},
+            ]
+        }
+        self.assertEqual(count_thumbs_reactions(msg), (1, 0))
+
     def test_count_thumbs_missing(self) -> None:
         self.assertEqual(count_thumbs_reactions({}), (0, 0))
         self.assertEqual(count_thumbs_reactions({"reactions": "bad"}), (0, 0))
@@ -127,7 +144,7 @@ class TestZulipFeedbackAggregate(unittest.TestCase):
         with_rx = [
             {
                 "content": f"P\n\nLink: {url}",
-                "reactions": [{"emoji_name": "thumbs_up", "user_id": 1}],
+                "reactions": [{"emoji_name": "+1", "user_id": 1}],
             }
         ]
         self.assertTrue(feedback_ranking_ready_for_next_post(with_rx))

@@ -281,7 +281,9 @@ def fetch_messages_narrow(
             break
 
     collected.sort(key=lambda m: m.get("timestamp", 0))
-    return collected[:max_messages]
+    if len(collected) > max_messages:
+        collected = collected[-max_messages:]
+    return collected
 
 
 def format_messages(messages: list[dict[str, Any]]) -> str:

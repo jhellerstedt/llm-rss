@@ -31,6 +31,10 @@ class GroupFeedbackCandidates:
     single_author_impact_penalty: int = 1
 _LINK_LINE = re.compile(r"(?im)^\s*Link:\s*(.+?)\s*$")
 
+# Zulip canonical reaction names are "+1" / "-1"; aliases include thumbs_up / thumbs_down.
+_THUMBS_UP_NAMES = frozenset({"+1", "thumbs_up", "like", "thumbsup", "thumbs-up"})
+_THUMBS_DOWN_NAMES = frozenset({"-1", "thumbs_down", "thumbsdown", "thumbs-down"})
+
 
 def unique_realm_stream_pairs(zulip_sources: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """Stable-unique (realm.lower(), stream) from zulip_sources rows."""
@@ -75,8 +79,24 @@ def parse_feedback_link_from_body(content: str) -> str | None:
     return url or None
 
 
+def _reaction_is_thumbs_up(reaction: dict[str, Any]) -> bool:
+    name = reaction.get("emoji_name")
+    if isinstance(name, str) and name in _THUMBS_UP_NAMES:
+        return True
+    code = str(reaction.get("emoji_code") or "")
+    return code == "1f44d" or code.startswith("1f44d-")
+
+
+def _reaction_is_thumbs_down(reaction: dict[str, Any]) -> bool:
+    name = reaction.get("emoji_name")
+    if isinstance(name, str) and name in _THUMBS_DOWN_NAMES:
+        return True
+    code = str(reaction.get("emoji_code") or "")
+    return code == "1f44e" or code.startswith("1f44e-")
+
+
 def count_thumbs_reactions(message: dict[str, Any]) -> tuple[int, int]:
-    """Count thumbs_up / thumbs_down on a Zulip message dict."""
+    """Count thumbs up / down on a Zulip message dict."""
     reactions = message.get("reactions") or []
     if not isinstance(reactions, list):
         return 0, 0
@@ -84,10 +104,9 @@ def count_thumbs_reactions(message: dict[str, Any]) -> tuple[int, int]:
     for r in reactions:
         if not isinstance(r, dict):
             continue
-        name = r.get("emoji_name")
-        if name == "thumbs_up":
+        if _reaction_is_thumbs_up(r):
             up += 1
-        elif name == "thumbs_down":
+        elif _reaction_is_thumbs_down(r):
             down += 1
     return up, down
 
