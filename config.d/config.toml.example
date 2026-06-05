@@ -18,6 +18,20 @@ max_http_attempts = 12
 prefilter_max_candidates = 20
 scoring_batch_size = 5
 
+[openrouter]
+# api_key = "your-openrouter-key"  # or set OPENROUTER_API_KEY env var
+# model = "anthropic/claude-3-5-haiku"  # see https://openrouter.ai/models
+# timeout = 60
+# site_url = "https://yourserver.example.com"
+# site_name = "llm-rss"
+
+# Which call types to route to OpenRouter instead of Kagi:
+# "scoring"    — article relevance/impact scoring (high volume; recommended)
+# "summarize"  — Zulip context compression when > context_max_chars
+# "curate"     — research_areas / excluded_areas curation from Zulip
+# "domains"    — academic journal domain classification
+route_to_openrouter = ["scoring", "summarize", "curate", "domains"]
+
 # OpenAlex metadata for feed items (h-index, first/last author affiliations).
 # Set mailto so OpenAlex can contact you if needed (also configurable via OPENALEX_MAILTO).
 [openalex]

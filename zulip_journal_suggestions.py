@@ -180,11 +180,7 @@ def _parse_kagi_journal_domain_filter_response(text: str) -> tuple[set[str], dic
     return allowed, reasons
 
 
-def filter_academic_journal_domains_with_kagi(
-    kagi,
-    domains: list[str],
-) -> tuple[list[str], dict[str, str]]:
-    """One FastGPT call to filter domains to academic journal/publisher sites."""
+def _build_journal_domain_filter_prompt(domains: list[str]) -> tuple[list[str], str]:
     uniq: list[str] = []
     seen: set[str] = set()
     for d in domains:
@@ -195,8 +191,7 @@ def filter_academic_journal_domains_with_kagi(
             seen.add(dd)
             uniq.append(dd)
     if not uniq:
-        return [], {}
-
+        return [], ""
     prompt = (
         "You are helping curate RSS sources for academic journals.\n"
         "Given this list of web domains, return ONLY the ones that are academic journals or "
@@ -207,15 +202,24 @@ def filter_academic_journal_domains_with_kagi(
         '- "reasons": object mapping domain -> short reason (optional)\n\n'
         f"Domains:\n{json.dumps(uniq)}\n"
     )
-    text = kagi.fastgpt_query(prompt)
+    return uniq, prompt
+
+
+def _filter_academic_journal_domains_from_llm_output(
+    text: str,
+    uniq: list[str],
+    *,
+    provider_label: str,
+) -> tuple[list[str], dict[str, str]]:
     if not (text or "").strip():
-        logger.warning("Kagi journal-domain filter returned empty output")
+        logger.warning("%s journal-domain filter returned empty output", provider_label)
         return [], {}
 
     allowed, reasons = _parse_kagi_journal_domain_filter_response(text)
     if not allowed:
         logger.warning(
-            "Kagi journal-domain filter parse miss or empty allowlist; snippet=%s",
+            "%s journal-domain filter parse miss or empty allowlist; snippet=%s",
+            provider_label,
             (text or "")[:400],
         )
         return [], {}
@@ -223,6 +227,34 @@ def filter_academic_journal_domains_with_kagi(
     kept = [d for d in uniq if d in allowed]
     kept_reasons = {d: reasons.get(d, "") for d in kept if reasons.get(d)}
     return kept, kept_reasons
+
+
+def filter_academic_journal_domains_with_kagi(
+    kagi,
+    domains: list[str],
+) -> tuple[list[str], dict[str, str]]:
+    """One FastGPT call to filter domains to academic journal/publisher sites."""
+    uniq, prompt = _build_journal_domain_filter_prompt(domains)
+    if not uniq:
+        return [], {}
+    text = kagi.fastgpt_query(prompt)
+    return _filter_academic_journal_domains_from_llm_output(
+        text, uniq, provider_label="Kagi"
+    )
+
+
+def filter_academic_journal_domains_with_openrouter(
+    openrouter,
+    domains: list[str],
+) -> tuple[list[str], dict[str, str]]:
+    """One OpenRouter call to filter domains to academic journal/publisher sites."""
+    uniq, prompt = _build_journal_domain_filter_prompt(domains)
+    if not uniq:
+        return [], {}
+    text = openrouter.chat_completion([{"role": "user", "content": prompt}])
+    return _filter_academic_journal_domains_from_llm_output(
+        text, uniq, provider_label="OpenRouter"
+    )
 
 
 def format_missing_journals_message(missing: dict[str, int]) -> str:
@@ -316,22 +348,20 @@ def _parse_group_area_curation_response(text: str) -> tuple[list[str], list[str]
     return research, excluded
 
 
-def curate_group_research_lists_with_kagi(
-    kagi,
+def _build_group_area_curation_prompt(
     *,
     group_name: str,
     research_areas: list[str],
     excluded_areas: list[str],
     journals_markdown: str,
     zulip_excerpt: str,
-) -> tuple[list[str], list[str]] | None:
-    """Ask FastGPT to revise research_areas and excluded_areas from Zulip + journal signals."""
+) -> str:
     ra = json.dumps(research_areas)
     ex = json.dumps(excluded_areas)
     zex = (zulip_excerpt or "").strip()
     if len(zex) > 18_000:
         zex = zex[:18_000] + "\n\n[truncated]"
-    prompt = (
+    return (
         "You maintain `research_areas` and `excluded_areas` strings for an academic RSS feed group.\n"
         "The team discusses papers on Zulip; below is an excerpt of that discussion, plus a summary of "
         "journal links they shared that are not yet on the group's feed list.\n\n"
@@ -347,16 +377,74 @@ def curate_group_research_lists_with_kagi(
         "at least one item)\n"
         '- "excluded_areas": array of strings (topics to generally deprioritize; may be empty)\n'
     )
-    text = kagi.fastgpt_query(prompt)
+
+
+def _curate_group_research_lists_from_llm_output(
+    text: str,
+    *,
+    group_name: str,
+    provider_label: str,
+) -> tuple[list[str], list[str]] | None:
     if not (text or "").strip():
-        logger.warning("Kagi group-area curation returned empty output (group=%s)", group_name)
+        logger.warning(
+            "%s group-area curation returned empty output (group=%s)",
+            provider_label,
+            group_name,
+        )
         return None
     parsed = _parse_group_area_curation_response(text)
     if parsed is None:
         logger.warning(
-            "Kagi group-area curation parse failed (group=%s); snippet=%s",
+            "%s group-area curation parse failed (group=%s); snippet=%s",
+            provider_label,
             group_name,
             (text or "")[:400],
         )
     return parsed
+
+
+def curate_group_research_lists_with_kagi(
+    kagi,
+    *,
+    group_name: str,
+    research_areas: list[str],
+    excluded_areas: list[str],
+    journals_markdown: str,
+    zulip_excerpt: str,
+) -> tuple[list[str], list[str]] | None:
+    """Ask FastGPT to revise research_areas and excluded_areas from Zulip + journal signals."""
+    prompt = _build_group_area_curation_prompt(
+        group_name=group_name,
+        research_areas=research_areas,
+        excluded_areas=excluded_areas,
+        journals_markdown=journals_markdown,
+        zulip_excerpt=zulip_excerpt,
+    )
+    text = kagi.fastgpt_query(prompt)
+    return _curate_group_research_lists_from_llm_output(
+        text, group_name=group_name, provider_label="Kagi"
+    )
+
+
+def curate_group_research_lists_with_openrouter(
+    openrouter,
+    *,
+    group_name: str,
+    research_areas: list[str],
+    excluded_areas: list[str],
+    journals_markdown: str,
+    zulip_excerpt: str,
+) -> tuple[list[str], list[str]] | None:
+    """Ask OpenRouter to revise research_areas and excluded_areas from Zulip + journal signals."""
+    prompt = _build_group_area_curation_prompt(
+        group_name=group_name,
+        research_areas=research_areas,
+        excluded_areas=excluded_areas,
+        journals_markdown=journals_markdown,
+        zulip_excerpt=zulip_excerpt,
+    )
+    text = openrouter.chat_completion([{"role": "user", "content": prompt}])
+    return _curate_group_research_lists_from_llm_output(
+        text, group_name=group_name, provider_label="OpenRouter"
+    )
 

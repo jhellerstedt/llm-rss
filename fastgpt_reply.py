@@ -82,7 +82,7 @@ def parse_batch_replies_from_fastgpt_output(
     return out
 
 
-def parse_reply_from_fastgpt_output(text: str, article_title: str) -> Reply:
+def _parse_reply_from_llm_json(text: str, article_title: str) -> Reply:
     raw = extract_json_object(text)
     try:
         data = json.loads(raw)
@@ -100,4 +100,13 @@ def parse_reply_from_fastgpt_output(text: str, article_title: str) -> Reply:
                 text[:400],
             )
             return Reply(relevance=0, impact=0, reason="decode error")
+
+
+def parse_reply_from_fastgpt_output(text: str, article_title: str) -> Reply:
+    return _parse_reply_from_llm_json(text, article_title)
+
+
+def parse_reply_from_openrouter_output(content: str, title: str) -> Reply:
+    """Parse raw OpenRouter message content into a Reply."""
+    return _parse_reply_from_llm_json(content, title)
 

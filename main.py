@@ -13,8 +13,13 @@ from tqdm import tqdm
 
 from adapter import ArticleInfo, RSSAdapter
 from article_prefilter import shortlist_for_kagi_scoring
-from fastgpt_reply import Reply, parse_reply_from_fastgpt_output
+from fastgpt_reply import (
+    Reply,
+    parse_reply_from_fastgpt_output,
+    parse_reply_from_openrouter_output,
+)
 from kagi_client import KagiClient, DEFAULT_FASTGPT_URL, DEFAULT_SUMMARIZE_URL
+from openrouter_client import OpenRouterClient, get_openrouter_usage, reset_openrouter_usage
 from openalex_enrich import (
     PaperEnrichment,
     apply_kagi_metadata_backfill,
@@ -23,6 +28,7 @@ from openalex_enrich import (
 )
 from api_usage import log_api_usage_summary, reset_api_usage_stats
 from kagi_batch_scoring import score_article_batch_with_kagi
+from openrouter_batch_scoring import score_article_batch_with_openrouter
 from kagi_quota import (
     KagiSessionQuotaExceeded,
     MAX_KAGI_INVOCATIONS_PER_RUN,
@@ -58,7 +64,9 @@ from zulip_journal_suggestions import (
     DEFAULT_DOMAIN_DENYLIST,
     apex_domains_from_nested,
     curate_group_research_lists_with_kagi,
+    curate_group_research_lists_with_openrouter,
     filter_academic_journal_domains_with_kagi,
+    filter_academic_journal_domains_with_openrouter,
     filter_nested_by_allowed_domains,
     format_missing_journals_message_nested,
     merge_journal_suggestion_maps,
@@ -100,6 +108,15 @@ def _format_feed_description(group_name: str, category: str | None) -> str:
 
 def to_bullets(text_list: list[str]) -> str:
     return "\n".join(f"- {item}" for item in text_list)
+
+
+def split_scoring_query(query: str) -> tuple[str, str]:
+    """Split a scoring prompt at the ### Article boundary (system / user messages)."""
+    marker = "### Article"
+    idx = query.find(marker)
+    if idx < 0:
+        return query.strip(), ""
+    return query[:idx].strip(), query[idx:].strip()
 
 
 def prepare_scoring_query(
@@ -149,6 +166,23 @@ def get_kagi_reply(
     query = prepare_scoring_query(article, group, zulip_block, feedback_snippet)
     output = kagi.fastgpt_query(query)
     return parse_reply_from_fastgpt_output(output, article.title)
+
+
+def get_openrouter_reply(
+    article: ArticleInfo,
+    group: dict,
+    openrouter: OpenRouterClient,
+    zulip_block: str,
+    feedback_snippet: str = "",
+) -> Reply:
+    query = prepare_scoring_query(article, group, zulip_block, feedback_snippet)
+    system, user = split_scoring_query(query)
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user or query})
+    output = openrouter.chat_completion(messages)
+    return parse_reply_from_openrouter_output(output, article.title)
 
 
 def _legacy_group(cfg: dict) -> dict:
@@ -234,6 +268,32 @@ def make_kagi_client(kagi_table: dict) -> KagiClient:
             kagi_table.get("min_seconds_between_requests", 2.0)
         ),
     )
+
+
+def make_openrouter_client(openrouter_table: dict | None) -> OpenRouterClient | None:
+    if not openrouter_table:
+        return None
+    api_key = (
+        openrouter_table.get("api_key") or os.environ.get("OPENROUTER_API_KEY", "")
+    ).strip()
+    if not api_key:
+        return None
+    return OpenRouterClient(
+        api_key=api_key,
+        model=openrouter_table.get("model"),
+        timeout=float(openrouter_table.get("timeout", 60)),
+        site_url=str(openrouter_table.get("site_url", "")),
+        site_name=str(openrouter_table.get("site_name", "llm-rss")),
+    )
+
+
+def routes_to_openrouter(
+    route_to_openrouter: list[str] | None,
+    kind: str,
+    *,
+    openrouter: OpenRouterClient | None,
+) -> bool:
+    return openrouter is not None and kind in (route_to_openrouter or [])
 
 
 @dataclass
@@ -354,6 +414,8 @@ def process_group(
     *,
     kagi_prefilter_cap: int = 20,
     kagi_batch_size: int = 5,
+    openrouter: OpenRouterClient | None = None,
+    route_to_openrouter: list[str] | None = None,
 ) -> GroupRunResult:
     rss_path = group["rss_path"]
     feed_link = str(group.get("feed_link", "myserver"))
@@ -380,11 +442,18 @@ def process_group(
                 group_name,
             )
         else:
+            summarize_client = (
+                openrouter
+                if routes_to_openrouter(
+                    route_to_openrouter, "summarize", openrouter=openrouter
+                )
+                else kagi
+            )
             zulip_block, zulip_msgs = build_zulip_context_and_messages(
                 zulip_sources,
                 zulip_realms,
                 context_max_chars,
-                kagi_summarize=kagi,
+                kagi_summarize=summarize_client,
             )
 
             # Journal suggestions are merged into config.toml once per run (see main()).
@@ -420,16 +489,23 @@ def process_group(
     cap = int(group.get("prefilter_max_candidates") or kagi_prefilter_cap)
     bsz = int(group.get("scoring_batch_size") or kagi_batch_size)
     n_art = len(recent_articles)
-    shortlist_n, batch_sz = plan_scoring_budget(
-        n_art,
-        prefilter_cap=cap,
-        batch_size=bsz,
+    use_openrouter_scoring = routes_to_openrouter(
+        route_to_openrouter, "scoring", openrouter=openrouter
     )
-    if shortlist_n == 0 and n_art > 0:
-        logger.warning(
-            "[%s] Kagi scoring shortlist empty (quota/reserve); all articles get score 0",
-            group_name,
+    if use_openrouter_scoring:
+        batch_sz = max(1, bsz)
+        shortlist_n = min(cap, n_art)
+    else:
+        shortlist_n, batch_sz = plan_scoring_budget(
+            n_art,
+            prefilter_cap=cap,
+            batch_size=bsz,
         )
+        if shortlist_n == 0 and n_art > 0:
+            logger.warning(
+                "[%s] Kagi scoring shortlist empty (quota/reserve); all articles get score 0",
+                group_name,
+            )
     shortlisted = shortlist_for_kagi_scoring(
         recent_articles,
         group,
@@ -437,9 +513,11 @@ def process_group(
         feedback_signals or None,
     )
     shortlisted_norm = {normalize_link(str(a.link)) for a in shortlisted}
+    scoring_label = "OpenRouter" if use_openrouter_scoring else "Kagi"
     logger.info(
-        "[%s] Kagi batched scoring: shortlist %d/%d, batch_size=%d",
+        "[%s] %s batched scoring: shortlist %d/%d, batch_size=%d",
         group_name,
+        scoring_label,
         len(shortlisted),
         n_art,
         batch_sz,
@@ -454,10 +532,12 @@ def process_group(
                 reason="not shortlisted for Kagi scoring",
             )
 
-    for i in tqdm(
-        range(0, len(shortlisted), batch_sz),
-        desc=f"Kagi FastGPT batches ({group_name})",
-    ):
+    batch_desc = (
+        f"OpenRouter batches ({group_name})"
+        if use_openrouter_scoring
+        else f"Kagi FastGPT batches ({group_name})"
+    )
+    for i in tqdm(range(0, len(shortlisted), batch_sz), desc=batch_desc):
         chunk = shortlisted[i : i + batch_sz]
         batch_items: list[tuple[str, ArticleInfo, str]] = []
         for j, art in enumerate(chunk):
@@ -465,20 +545,40 @@ def process_group(
             fb = format_feedback_prompt_snippet(str(art.link), feedback_signals)
             batch_items.append((bid, art, fb))
         try:
-            parsed = score_article_batch_with_kagi(
-                kagi, batch_items, group, zulip_block
-            )
+            if use_openrouter_scoring:
+                assert openrouter is not None
+                parsed = score_article_batch_with_openrouter(
+                    openrouter, batch_items, group, zulip_block
+                )
+            else:
+                parsed = score_article_batch_with_kagi(
+                    kagi, batch_items, group, zulip_block
+                )
         except Exception as e:
-            logger.warning("Kagi batch scoring failed: %s", e)
+            logger.warning("%s batch scoring failed: %s", scoring_label, e)
             parsed = {}
         for bid, art, _ in batch_items:
             r = parsed.get(bid)
             if r is None:
                 try:
                     fb = format_feedback_prompt_snippet(str(art.link), feedback_signals)
-                    r = get_kagi_reply(art, group, kagi, zulip_block, feedback_snippet=fb)
+                    if use_openrouter_scoring:
+                        assert openrouter is not None
+                        r = get_openrouter_reply(
+                            art,
+                            group,
+                            openrouter,
+                            zulip_block,
+                            feedback_snippet=fb,
+                        )
+                    else:
+                        r = get_kagi_reply(
+                            art, group, kagi, zulip_block, feedback_snippet=fb
+                        )
                 except Exception as e2:
-                    logger.warning("Kagi single-article fallback failed: %s", e2)
+                    logger.warning(
+                        "%s single-article fallback failed: %s", scoring_label, e2
+                    )
                     r = Reply(
                         relevance=0,
                         impact=0,
@@ -578,6 +678,7 @@ def process_group(
 def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
     reset_api_usage_stats()
     reset_kagi_session_quota()
+    reset_openrouter_usage()
     try:
         cfg = toml.load(config_path)
         openalex_cfg = dict(cfg.get("openalex") or {})
@@ -586,6 +687,26 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
         if not kagi.api_key:
             raise ValueError(
                 "Kagi API key missing: set [kagi] api_key or environment variable KAGI_API_KEY"
+            )
+
+        openrouter_table = cfg.get("openrouter")
+        openrouter = make_openrouter_client(openrouter_table)
+        route_to_openrouter = (
+            list(openrouter_table.get("route_to_openrouter") or [])
+            if openrouter_table
+            else []
+        )
+        if openrouter_table and route_to_openrouter and openrouter is None:
+            logger.warning(
+                "[openrouter] section present with route_to_openrouter=%s but no API key; "
+                "falling back to Kagi for those call types",
+                route_to_openrouter,
+            )
+        elif openrouter is not None:
+            logger.info(
+                "OpenRouter enabled (model=%s); routed call types: %s",
+                openrouter.model,
+                route_to_openrouter or "(none)",
             )
 
         zulip_cfg = cfg.get("zulip") or {}
@@ -623,6 +744,8 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                     config_path,
                     kagi_prefilter_cap=pf_cap,
                     kagi_batch_size=batch_sz,
+                    openrouter=openrouter,
+                    route_to_openrouter=route_to_openrouter,
                 )
             )
 
@@ -711,7 +834,7 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                     single_author_impact_penalty=batch.single_author_impact_penalty,
                 )
 
-        # One Kagi journal-domain filter for the run, then merge feeds + curated lists into config.toml.
+        # One journal-domain filter for the run, then merge feeds + curated lists into config.toml.
         if suggestions_by_group_idx and kagi:
             all_domains: list[str] = sorted(
                 {
@@ -720,12 +843,25 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                     for d in apex_domains_from_nested(nested)
                 }
             )
+            use_openrouter_domains = routes_to_openrouter(
+                route_to_openrouter, "domains", openrouter=openrouter
+            )
             try:
-                allowed, _reasons = filter_academic_journal_domains_with_kagi(kagi, all_domains)
+                if use_openrouter_domains:
+                    assert openrouter is not None
+                    allowed, _reasons = filter_academic_journal_domains_with_openrouter(
+                        openrouter, all_domains
+                    )
+                else:
+                    allowed, _reasons = filter_academic_journal_domains_with_kagi(
+                        kagi, all_domains
+                    )
                 allowed_set = set(allowed)
             except Exception:
+                provider = "OpenRouter" if use_openrouter_domains else "Kagi"
                 logger.exception(
-                    "Kagi journal-domain filter failed; skipping journal suggestion config updates"
+                    "%s journal-domain filter failed; skipping journal suggestion config updates",
+                    provider,
                 )
                 allowed_set = set()
 
@@ -754,7 +890,26 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                     zulip_excerpt = zulip_plain_block_by_group_idx.get(gi, "")
 
                     curated = None
-                    if remaining_kagi_invocations() < 1:
+                    use_openrouter_curate = routes_to_openrouter(
+                        route_to_openrouter, "curate", openrouter=openrouter
+                    )
+                    if use_openrouter_curate:
+                        try:
+                            assert openrouter is not None
+                            curated = curate_group_research_lists_with_openrouter(
+                                openrouter,
+                                group_name=str(group.get("name", "unnamed")),
+                                research_areas=list(gtable.get("research_areas") or []),
+                                excluded_areas=list(gtable.get("excluded_areas") or []),
+                                journals_markdown=journals_md,
+                                zulip_excerpt=zulip_excerpt,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "OpenRouter research-area curation failed; group=%s",
+                                group.get("name"),
+                            )
+                    elif remaining_kagi_invocations() < 1:
                         if not research_area_kagi_skip_logged:
                             logger.warning(
                                 "Kagi session quota exhausted (%s invocations/run); skipping "
@@ -841,6 +996,14 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
     finally:
         log_api_usage_summary(logger)
         log_kagi_quota_status(logger)
+        or_usage = get_openrouter_usage()
+        if or_usage.get("calls", 0) > 0:
+            logger.info(
+                "OpenRouter usage: calls=%s, input_tokens=%s, output_tokens=%s",
+                or_usage.get("calls", 0),
+                or_usage.get("input_tokens", 0),
+                or_usage.get("output_tokens", 0),
+            )
 
 
 def _dispatch_feedback_queue_configs(

@@ -22,6 +22,12 @@ LLM-RSS reads titles and abstracts from science RSS feeds (Nature, arXiv, APS, a
    - Set `KAGI_API_KEY` in the environment or put `api_key` under `[kagi]` in your TOML config.
    - Requests use `Authorization: Bot <token>` against `https://kagi.com/api/v0/fastgpt` by default.
 
+   **Optional: OpenRouter** (alternative LLM for scoring, Zulip summarization, and journal curation):
+   - Add an `[openrouter]` section in your TOML (see [config.d/config.toml.example](config.d/config.toml.example)).
+   - Set `OPENROUTER_API_KEY` in the environment or `api_key` under `[openrouter]`.
+   - Optionally set `OPENROUTER_MODEL` or `model` in config (default: `anthropic/claude-3-5-haiku`).
+   - Use `route_to_openrouter` to choose which call types use OpenRouter instead of Kagi; Kagi remains used for web-search-dependent calls (e.g. OpenAlex metadata backfill).
+
 4. **Configure the app**
    - Copy [config.d/config.toml.example](config.d/config.toml.example) to `config.d/config.toml` and edit.
    - Use `[[groups]]` for separate topical feeds (each group has its own `urls`, thresholds, and `rss_path`).
