@@ -16,24 +16,34 @@ LLM-RSS reads titles and abstracts from science RSS feeds (Nature, arXiv, APS, a
    pip install -r requirements.txt
    ```
 
-3. **Configure Kagi**
+3. **Secrets (API keys)** — this repo is public; never commit real keys.
+
+   Recommended: copy [`.env.example`](.env.example) to `.env` in the project root (`.env` is gitignored):
+
+   ```bash
+   cp .env.example .env
+   # edit .env and set KAGI_API_KEY=... (and OPENROUTER_API_KEY=... if using OpenRouter)
+   ```
+
+   `main.py` calls `load_dotenv()` on startup, so keys in `.env` are picked up automatically. You can also export variables in your shell or cron environment. Avoid putting keys in tracked files; `config.d/*.toml` and `config.d/*.json` are gitignored for local config, but `.env` keeps secrets separate from feed settings.
+
+4. **Configure Kagi**
    - Create a [Kagi](https://kagi.com) account and open **Settings → Advanced → API portal** to generate an API token.
    - Add **API credits** (FastGPT is billed per query; see [FastGPT API](https://help.kagi.com/kagi/api/fastgpt.html)).
-   - Set `KAGI_API_KEY` in the environment or put `api_key` under `[kagi]` in your TOML config.
-   - Requests use `Authorization: Bot <token>` against `https://kagi.com/api/v0/fastgpt` by default.
+   - Set `KAGI_API_KEY` in `.env` (or the environment). Requests use `Authorization: Bot <token>` against `https://kagi.com/api/v0/fastgpt` by default.
 
    **Optional: OpenRouter** (alternative LLM for scoring, Zulip summarization, and journal curation):
    - Add an `[openrouter]` section in your TOML (see [config.d/config.toml.example](config.d/config.toml.example)).
-   - Set `OPENROUTER_API_KEY` in the environment or `api_key` under `[openrouter]`.
-   - Optionally set `OPENROUTER_MODEL` or `model` in config (default: `anthropic/claude-3-5-haiku`).
+   - Set `OPENROUTER_API_KEY` in `.env` (or the environment).
+   - Optionally set `OPENROUTER_MODEL` in `.env` or `model` in config (default: `anthropic/claude-3-5-haiku`).
    - Use `route_to_openrouter` to choose which call types use OpenRouter instead of Kagi; Kagi remains used for web-search-dependent calls (e.g. OpenAlex metadata backfill).
 
-4. **Configure the app**
+5. **Configure the app**
    - Copy [config.d/config.toml.example](config.d/config.toml.example) to `config.d/config.toml` and edit.
    - Use `[[groups]]` for separate topical feeds (each group has its own `urls`, thresholds, and `rss_path`).
    - With no `groups` key, a **legacy** single-group layout is still supported: top-level `urls`, `research_areas`, `excluded_areas`, and `rss_path`.
 
-5. **Optional: Zulip context**
+6. **Optional: Zulip context**
    - Install credentials the same way as in **zulip-kagi-bot**: either a JSON file mapping realm name to `{ "email", "api_key", "site" }`, or environment variables `ZULIP_REALM_<NAME>_EMAIL`, `ZULIP_REALM_<NAME>_API_KEY`, `ZULIP_REALM_<NAME>_SITE`.
    - Point `[zulip] realms_config_file` at that JSON (paths relative to the config TOML’s directory, e.g. `config.d/zulip_realms.json`), or place `zulip_realms.json` next to the TOML / working directory, or set `ZULIP_REALMS_CONFIG_FILE`.
    - Per group, set `zulip_sources` to a list of tables: `realm`, `stream`, optional `topic`, `lookback_hours`, `max_messages`.

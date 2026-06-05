@@ -1,4 +1,4 @@
-# Kagi API: set api_key here or use environment variable KAGI_API_KEY
+# Kagi API: prefer KAGI_API_KEY in .env (see .env.example); api_key here also works in local config.toml
 [kagi]
 # api_key = "your-token"
 fastgpt_url = "https://kagi.com/api/v0/fastgpt"
@@ -19,7 +19,7 @@ prefilter_max_candidates = 20
 scoring_batch_size = 5
 
 [openrouter]
-# api_key = "your-openrouter-key"  # or set OPENROUTER_API_KEY env var
+# api_key = "your-openrouter-key"  # prefer OPENROUTER_API_KEY in .env (see .env.example)
 # model = "anthropic/claude-3-5-haiku"  # see https://openrouter.ai/models
 # timeout = 60
 # site_url = "https://yourserver.example.com"

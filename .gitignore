@@ -4,6 +4,11 @@
 .venv/
 *.pyc
 
+# Local secrets (copy .env.example to .env; never commit .env)
+.env
+.env.*
+!.env.example
+
 # Secrets in local config (tracked templates: *.example.* or README in config.d/)
 config.d/**/*.toml
 config.d/**/*.json
