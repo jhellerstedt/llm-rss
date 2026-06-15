@@ -74,6 +74,8 @@ from zulip_journal_suggestions import (
     new_feed_urls_from_filtered_nested,
 )
 from zulip_journal_weekly_summary import maybe_post_weekly_journal_config_summary
+from author_whitelist import AuthorWhitelist, force_included_whitelist_items
+from author_whitelist_bot import run_author_whitelist_bot
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -416,6 +418,7 @@ def process_group(
     kagi_batch_size: int = 5,
     openrouter: OpenRouterClient | None = None,
     route_to_openrouter: list[str] | None = None,
+    author_whitelist: "AuthorWhitelist | None" = None,
 ) -> GroupRunResult:
     rss_path = group["rss_path"]
     feed_link = str(group.get("feed_link", "myserver"))
@@ -600,6 +603,17 @@ def process_group(
         if reply.relevance > relevance_threshold and reply.impact > impact_threshold
     ]
 
+    for article, forced_reply, hit in force_included_whitelist_items(
+        recent_articles, replies, passing, author_whitelist
+    ):
+        passing.append((article, forced_reply))
+        logger.info(
+            "[%s] author whitelist: force-including %r (matched %s)",
+            group_name,
+            article.title,
+            hit.display_name,
+        )
+
     enrichment_by_link: dict[str, PaperEnrichment | None] = {}
     if passing:
         if openalex_enabled:
@@ -722,6 +736,32 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
             config_file=realms_path, config_dir=config_path.parent
         )
 
+        author_whitelist = None
+        aw_cfg = cfg.get("author_whitelist") or {}
+        if aw_cfg and aw_cfg.get("enabled", True):
+            wl_file = aw_cfg.get("file", "author_whitelist.json")
+            wl_path = Path(wl_file)
+            if not wl_path.is_absolute():
+                wl_path = (config_path.parent / wl_path).resolve()
+            author_whitelist = AuthorWhitelist.load(wl_path)
+            command_source = aw_cfg.get("command_source")
+            if command_source and zulip_realms:
+                aw_mailto = openalex_cfg.get("mailto") or os.environ.get(
+                    "OPENALEX_MAILTO"
+                )
+                try:
+                    changed = run_author_whitelist_bot(
+                        author_whitelist,
+                        command_source=command_source,
+                        realms=zulip_realms,
+                        mailto=aw_mailto,
+                        dryrun=dryrun,
+                    )
+                    if changed and not dryrun:
+                        author_whitelist.save(wl_path)
+                except Exception:
+                    logger.exception("[author-whitelist] bot poll failed")
+
         groups = expand_groups(cfg)
         kagi_cfg = cfg.get("kagi") or {}
         pf_cap = int(kagi_cfg.get("prefilter_max_candidates", 20))
@@ -746,6 +786,7 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                     kagi_batch_size=batch_sz,
                     openrouter=openrouter,
                     route_to_openrouter=route_to_openrouter,
+                    author_whitelist=author_whitelist,
                 )
             )
 
