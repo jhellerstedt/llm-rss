@@ -107,7 +107,7 @@ remove 0000-0002-1825-0097
 list
 ```
 
-The bot resolves the identity (ORCID + OpenAlex), adds the author, and replies with what it matched so you can verify; `remove` undoes a wrong match. Commands are processed once per cron run.
+The bot resolves the identity (ORCID + OpenAlex), adds the author, and replies with what it matched so you can verify; `remove` undoes a wrong match. Successful commands get a `:+1:` reaction on your message; failures get `:-1:`. Commands are processed once per cron run.
 
 ## Supported RSS providers
 

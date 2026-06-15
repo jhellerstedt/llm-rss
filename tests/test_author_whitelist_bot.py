@@ -28,6 +28,7 @@ def _fake_client(messages):
     c = MagicMock()
     c.get_messages.return_value = {"result": "success", "messages": messages}
     c.send_message.return_value = {"result": "success"}
+    c.add_reaction.return_value = {"result": "success"}
     return c
 
 
@@ -79,6 +80,9 @@ class TestRunBot(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(len(wl.authors), 1)
         client.send_message.assert_called_once()
+        client.add_reaction.assert_called_once_with(
+            {"message_id": 101, "emoji_name": "+1"}
+        )
         sent = client.send_message.call_args[0][0]
         self.assertEqual(sent["topic"], "author whitelist")
         self.assertEqual(wl.get_cursor("tuesday:science:author whitelist"), 101)
@@ -97,6 +101,24 @@ class TestRunBot(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(wl.authors, [])
         client.send_message.assert_not_called()
+        client.add_reaction.assert_not_called()
+
+    @patch("author_whitelist_bot._client_for_realm")
+    @patch("author_whitelist_bot.resolve")
+    def test_failed_add_reacts_minus_one(self, mock_resolve, mock_client_for):
+        from author_resolve import AuthorResolveError
+
+        mock_resolve.side_effect = AuthorResolveError("bad orcid")
+        client = _fake_client([_msg(101, "add not-valid")])
+        mock_client_for.return_value = client
+        wl = AuthorWhitelist()
+        run_author_whitelist_bot(
+            wl, command_source=SOURCE, realms=REALMS, mailto="me@x.com", dryrun=False
+        )
+        client.add_reaction.assert_called_once_with(
+            {"message_id": 101, "emoji_name": "-1"}
+        )
+        self.assertEqual(wl.authors, [])
 
     @patch("author_whitelist_bot._client_for_realm")
     @patch("author_whitelist_bot.resolve")
@@ -121,6 +143,7 @@ class TestRunBot(unittest.TestCase):
             wl, command_source=SOURCE, realms=REALMS, mailto="me@x.com", dryrun=True
         )
         client.send_message.assert_not_called()
+        client.add_reaction.assert_not_called()
         self.assertEqual(len(wl.authors), 1)
 
 

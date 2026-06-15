@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 
 from author_resolve import AuthorResolveError, resolve
 from author_whitelist import AuthorWhitelist
+from api_usage import record_zulip_api
 from zulip_context import _client_for_realm, fetch_messages_narrow
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,31 @@ def _send(client, stream: str, topic: str, content: str, dryrun: bool) -> None:
         logger.exception("Failed to send author-whitelist reply")
 
 
+def _react(client, message_id: int, *, success: bool, dryrun: bool) -> None:
+    emoji = "+1" if success else "-1"
+    if dryrun:
+        logger.info(
+            "[author-whitelist dryrun] would react :%s: on message %s",
+            emoji,
+            message_id,
+        )
+        return
+    try:
+        result = client.add_reaction(
+            {"message_id": message_id, "emoji_name": emoji}
+        )
+        record_zulip_api(1)
+        if result.get("result") != "success":
+            logger.warning(
+                "add_reaction :%s: failed for message %s: %s",
+                emoji,
+                message_id,
+                result.get("msg", result),
+            )
+    except Exception:
+        logger.exception("Failed to add reaction on message %s", message_id)
+
+
 def run_author_whitelist_bot(
     whitelist: AuthorWhitelist,
     *,
@@ -150,9 +176,11 @@ def run_author_whitelist_bot(
             whitelist.set_cursor(key, mid)
             continue
         action, arg = cmd
+        success = False
         try:
             if action == "list":
                 _send(client, stream, topic, format_list_reply(whitelist), dryrun)
+                success = True
             elif action == "remove":
                 removed = whitelist.remove(arg)
                 if removed is not None:
@@ -160,6 +188,7 @@ def run_author_whitelist_bot(
                     _send(
                         client, stream, topic, format_removed_reply(removed), dryrun
                     )
+                    success = True
                 else:
                     _send(
                         client,
@@ -177,6 +206,7 @@ def run_author_whitelist_bot(
                 _send(
                     client, stream, topic, format_added_reply(author, added), dryrun
                 )
+                success = True
         except AuthorResolveError as e:
             _send(client, stream, topic, format_error_reply(str(e)), dryrun)
         except Exception as e:
@@ -188,5 +218,6 @@ def run_author_whitelist_bot(
                 format_error_reply(f"unexpected error ({e})"),
                 dryrun,
             )
+        _react(client, mid, success=success, dryrun=dryrun)
         whitelist.set_cursor(key, mid)
     return changed
