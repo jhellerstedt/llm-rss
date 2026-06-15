@@ -60,6 +60,20 @@ context_max_chars = 12000
 # Optional queue file path (relative to this TOML's directory; default: <stem>.feedback_ranking_queue.json).
 # feedback_ranking_queue_file = "data/feedback_ranking_queue.json"
 
+# Author whitelist: papers by these authors are ALWAYS included, bypassing the
+# relevance/impact thresholds. Manage it from Zulip by posting in `command_source`:
+#   add https://orcid.org/0000-0002-1825-0097
+#   add https://scholar.google.com/citations?user=XXXX
+#   remove 0000-0002-1825-0097     (or an OpenAlex id, or a display name)
+#   list
+# Matching is by author name (aliases captured from ORCID/OpenAlex at add time), so
+# it fires immediately—even on same-day articles OpenAlex hasn't indexed yet.
+# The whitelist file is JSON, stored next to this config (gitignored as local state).
+# [author_whitelist]
+# enabled = true
+# file = "author_whitelist.json"
+# command_source = { realm = "myrealm", stream = "papers", topic = "author whitelist", lookback_hours = 168, max_messages = 200 }
+
 # Topical group 1: condensed matter / general physics journals
 [[groups]]
 name = "cm_physics"

@@ -92,6 +92,23 @@ If you use `feedback_ranking_use_queue`, add a separate hourly (or other interva
   - `N article(s) scored, none above relevance>… and impact>…` — articles were scored by Kagi but every one fell at or below your thresholds.
   - `dry run — would write …` — `--dryrun`: scoring ran, file not written.
 
+## Author whitelist
+
+Papers by specific researchers can be **always included**, bypassing the LLM relevance/impact thresholds. Matching is by author name (captured with aliases from ORCID/OpenAlex when the author is added), so it fires immediately — even on same-day articles OpenAlex hasn't indexed yet.
+
+Enable it with an `[author_whitelist]` section (see `config.d/config.toml.example`). The whitelist is a JSON file (`config.d/author_whitelist.json`, gitignored as local state).
+
+Manage it by posting in the configured Zulip topic (default `author whitelist`):
+
+```
+add https://orcid.org/0000-0002-1825-0097
+add https://scholar.google.com/citations?user=XXXX
+remove 0000-0002-1825-0097
+list
+```
+
+The bot resolves the identity (ORCID + OpenAlex), adds the author, and replies with what it matched so you can verify; `remove` undoes a wrong match. Commands are processed once per cron run.
+
 ## Supported RSS providers
 
 - Nature
