@@ -49,6 +49,7 @@ from rss_merge import (
 from zulip_context import build_zulip_context_and_messages, load_zulip_realms
 from zulip_feedback import (
     GroupFeedbackCandidates,
+    build_team_comments_block,
     filter_to_group_winning_links,
     format_feedback_prompt_snippet,
     load_feedback_state_for_group,
@@ -388,6 +389,7 @@ def _dispatch_group_feedback_posts(
             feedback_post_links,
             group_name=batch.group_name,
             dryrun=dryrun,
+            zulip_realms=zulip_realms,
         )
     else:
         logger.info(
@@ -438,6 +440,8 @@ def process_group(
 
     zulip_block = ""
     zulip_msgs: list[dict[str, Any]] = []
+    feedback_signals: dict[str, tuple[int, int]] = {}
+    feedback_msgs_by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
     if zulip_sources:
         if not zulip_realms:
             logger.warning(
@@ -445,6 +449,13 @@ def process_group(
                 group_name,
             )
         else:
+            feedback_signals, feedback_msgs_by_pair = load_feedback_state_for_group(
+                zulip_sources, zulip_realms
+            )
+            comments_block = build_team_comments_block(
+                feedback_msgs_by_pair, zulip_realms
+            )
+            extra_sections = [comments_block] if comments_block else None
             summarize_client = (
                 openrouter
                 if routes_to_openrouter(
@@ -457,16 +468,10 @@ def process_group(
                 zulip_realms,
                 context_max_chars,
                 kagi_summarize=summarize_client,
+                extra_sections=extra_sections,
             )
 
             # Journal suggestions are merged into config.toml once per run (see main()).
-
-    feedback_signals: dict[str, tuple[int, int]] = {}
-    feedback_msgs_by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    if zulip_sources and zulip_realms:
-        feedback_signals, feedback_msgs_by_pair = load_feedback_state_for_group(
-            zulip_sources, zulip_realms
-        )
 
     rss_urls = group["urls"]
     rss_max_items = group["rss_max_items"]

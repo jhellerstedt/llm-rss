@@ -103,45 +103,53 @@ def build_zulip_context_and_messages(
     realms: dict[str, dict[str, str]],
     context_max_chars: int,
     kagi_summarize: Any | None = None,
+    extra_sections: list[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Like build_zulip_context_block, but also returns the raw message dicts fetched."""
-    if not zulip_sources:
-        return "", []
+    """Like build_zulip_context_block, but also returns the raw message dicts fetched.
 
-    try:
-        import zulip  # noqa: F401
-    except ImportError as e:
-        raise ImportError("Install the 'zulip' package when using zulip_sources") from e
-
+    ``extra_sections`` are appended to fetched stream/topic sections before truncation
+    or summarization (e.g. teammate notes from the feedback-ranking topic).
+    """
     parts: list[str] = []
     all_msgs: list[dict[str, Any]] = []
-    for src in zulip_sources:
-        realm = src.get("realm")
-        stream = src.get("stream")
-        if not realm or not stream:
-            logger.warning("Skipping zulip source missing realm or stream: %s", src)
-            continue
-        topic = src.get("topic")
-        lookback = int(src.get("lookback_hours", 168))
-        max_msg = int(src.get("max_messages", 500))
+    if zulip_sources:
         try:
-            client = _client_for_realm(realms, str(realm).lower())
-        except KeyError as e:
-            logger.error("%s", e)
-            continue
-        try:
-            msgs = fetch_messages_narrow(client, stream, topic, lookback, max_msg)
-        except Exception:
-            logger.exception("Zulip fetch failed realm=%s stream=%s", realm, stream)
-            continue
-        label = f"{realm}/{stream}" + (f"/{topic}" if topic else "")
-        for m in msgs:
-            tagged = dict(m)
-            tagged[ZULIP_SECTION_META_KEY] = label
-            all_msgs.append(tagged)
-        body = format_messages(msgs)
-        if body:
-            parts.append(f"### {label}\n{body}")
+            import zulip  # noqa: F401
+        except ImportError as e:
+            raise ImportError("Install the 'zulip' package when using zulip_sources") from e
+
+        for src in zulip_sources:
+            realm = src.get("realm")
+            stream = src.get("stream")
+            if not realm or not stream:
+                logger.warning("Skipping zulip source missing realm or stream: %s", src)
+                continue
+            topic = src.get("topic")
+            lookback = int(src.get("lookback_hours", 168))
+            max_msg = int(src.get("max_messages", 500))
+            try:
+                client = _client_for_realm(realms, str(realm).lower())
+            except KeyError as e:
+                logger.error("%s", e)
+                continue
+            try:
+                msgs = fetch_messages_narrow(client, stream, topic, lookback, max_msg)
+            except Exception:
+                logger.exception("Zulip fetch failed realm=%s stream=%s", realm, stream)
+                continue
+            label = f"{realm}/{stream}" + (f"/{topic}" if topic else "")
+            for m in msgs:
+                tagged = dict(m)
+                tagged[ZULIP_SECTION_META_KEY] = label
+                all_msgs.append(tagged)
+            body = format_messages(msgs)
+            if body:
+                parts.append(f"### {label}\n{body}")
+
+    for section in extra_sections or []:
+        text = (section or "").strip()
+        if text:
+            parts.append(text)
 
     raw = "\n\n".join(parts).strip()
     if not raw:

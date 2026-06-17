@@ -14,6 +14,7 @@ from rss_merge import normalize_link
 from zulip_context import fetch_messages_narrow, _client_for_realm
 from zulip_feedback import (
     FEEDBACK_RANKING_TOPIC,
+    bot_identity_for_realm,
     feedback_ranking_ready_for_next_post,
     format_feedback_post_body,
     links_announced_in_messages,
@@ -200,10 +201,12 @@ def enqueue_feedback_ranking_for_group(
     *,
     group_name: str,
     dryrun: bool,
+    zulip_realms: dict[str, dict[str, str]] | None = None,
 ) -> int:
     """Append ranked items per (realm, stream) when not already posted or pending. Returns new row count."""
     if not titles_and_links or not zulip_sources:
         return 0
+    realms = zulip_realms or {}
     path = feedback_ranking_queue_path(config_path, zulip_cfg)
     existed_before = path.exists()
     added = 0
@@ -211,7 +214,8 @@ def enqueue_feedback_ranking_for_group(
         by_pair = _doc_to_by_pair(doc)
         for realm, stream in unique_realm_stream_pairs(zulip_sources):
             msgs = messages_by_pair.get((realm, stream), [])
-            posted = links_announced_in_messages(msgs)
+            bot_email, bot_name = bot_identity_for_realm(realms, realm)
+            posted = links_announced_in_messages(msgs, bot_email, bot_name)
             key_list = by_pair.setdefault((realm, stream), [])
             pending_keys = {normalize_link(str(x["link"])) for x in key_list}
             for title, link, enrichment in titles_and_links:
@@ -283,6 +287,13 @@ def dispatch_feedback_ranking_queue_once(
             except KeyError as e:
                 logger.error("%s", e)
                 continue
+            except Exception:
+                # e.g. transient AssertionError when the server returns no version on
+                # client init; skip this realm rather than crashing the whole dispatch.
+                logger.exception(
+                    "Feedback queue dispatch: client init failed realm=%s", realm
+                )
+                continue
             try:
                 msgs = fetch_messages_narrow(
                     client, stream, FEEDBACK_RANKING_TOPIC, lookback, max_msg
@@ -294,7 +305,8 @@ def dispatch_feedback_ranking_queue_once(
                     stream,
                 )
                 continue
-            posted = links_announced_in_messages(msgs)
+            bot_email, bot_name = bot_identity_for_realm(zulip_realms, realm)
+            posted = links_announced_in_messages(msgs, bot_email, bot_name)
             k = normalize_link(link)
             if k in posted:
                 by_pair[(realm, stream)] = pending[1:]
@@ -304,7 +316,7 @@ def dispatch_feedback_ranking_queue_once(
                     stream,
                 )
                 continue
-            if not feedback_ranking_ready_for_next_post(msgs):
+            if not feedback_ranking_ready_for_next_post(msgs, bot_email, bot_name):
                 logger.info(
                     "Feedback queue: waiting for reaction on previous post "
                     "realm=%s stream=%s",
