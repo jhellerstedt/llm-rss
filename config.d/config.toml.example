@@ -60,6 +60,23 @@ context_max_chars = 12000
 # Optional queue file path (relative to this TOML's directory; default: <stem>.feedback_ranking_queue.json).
 # feedback_ranking_queue_file = "data/feedback_ranking_queue.json"
 
+# Adaptive feedback control (requires groups with zulip_sources). Adjusts each group's
+# effective relevance/impact thresholds from recent :+1:/:-1: reactions (target 80% +1)
+# and scales feedback enqueue rate to match Zulip post consumption. State file:
+# <config-stem>.feedback_control.json (override with file= below).
+# [feedback_control]
+# enabled = true
+# target_up_ratio = 0.80
+# consumption_window_days = 7
+# ratio_sample_size = 20
+# ratio_min_samples = 5
+# max_threshold_margin = 3
+# max_enqueue_per_run = 2
+# target_queue_depth = 2
+# margin_step = 1
+# ratio_deadband = 0.10
+# file = "data/feedback_control.json"
+
 # Author whitelist: papers by these authors are ALWAYS included, bypassing the
 # relevance/impact thresholds. Manage it from Zulip by posting in `command_source`:
 #   add https://orcid.org/0000-0002-1825-0097
@@ -101,9 +118,10 @@ impact_threshold = 3
 
 # Optional: pull discussion context from Zulip (requires zulip_realms.json or env realms).
 # Each row's optional "topic" / lookback only affect discussion context, not feedback.
-# When zulip_sources is set, the bot also posts at most two Zulip messages per group run
-# total (the two highest-ranked passing papers by relevance then impact; skips links already
-# present in each stream's "feedback ranking" topic). The same paper URL in multiple [[groups]]
+# When zulip_sources is set, the bot also posts feedback-ranking picks each group run
+# (highest-ranked passing papers by relevance then impact; count adapts when
+# [feedback_control] is enabled — see below). Skips links already present in each
+# stream's "feedback ranking" topic. The same paper URL in multiple [[groups]]
 # appears in only one group's RSS feed and at most one feedback-ranking post per run—the group
 # where it scored highest on relevance (then impact).
 # If you list multiple realm/stream rows,

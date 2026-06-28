@@ -29,6 +29,7 @@ class GroupFeedbackCandidates:
     messages_by_pair: dict[tuple[str, str], list[dict[str, Any]]]
     title_link_scores: list[TitleLinkScore]
     single_author_impact_penalty: int = 1
+    max_posts: int = MAX_FEEDBACK_RANKING_POSTS_PER_GROUP
 _LINK_LINE = re.compile(r"(?im)^\s*Link:\s*(.+?)\s*$")
 
 # Zulip canonical reaction names are "+1" / "-1"; aliases include thumbs_up / thumbs_down.

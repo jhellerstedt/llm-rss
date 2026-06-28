@@ -52,6 +52,7 @@ LLM-RSS reads titles and abstracts from science RSS feeds (Nature, arXiv, APS, a
      ```bash
      0 * * * * cd /path/to/llm-rss && /path/to/.venv/bin/python main.py --dispatch-feedback-queue --config-path config.d/config.toml
      ```
+   - **Adaptive feedback control (optional):** when a group has `zulip_sources`, `[feedback_control]` (enabled by default) adjusts that group's effective `relevance_threshold` and `impact_threshold` from recent `:+1:` / `:-1:` reactions in the feedback topic (target 80% positive), and scales how many papers are queued or posted per run to match how fast the queue is consumed. State is stored in `<config-stem>.feedback_control.json` beside the TOML. Whitelisted authors still bypass thresholds. Set `enabled = false` under `[feedback_control]` to use fixed config thresholds and up to two feedback posts per run.
 
 ## Running
 

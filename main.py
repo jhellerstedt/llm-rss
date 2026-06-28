@@ -55,7 +55,9 @@ from zulip_feedback import (
     load_feedback_state_for_group,
     post_feedback_ranking_for_new_items,
     select_top_ranked_for_feedback_posts,
+    MAX_FEEDBACK_RANKING_POSTS_PER_GROUP,
 )
+from zulip_feedback_control import apply_feedback_control_for_group
 from zulip_feedback_queue import (
     dispatch_feedback_ranking_queue_once,
     enqueue_feedback_ranking_for_group,
@@ -366,9 +368,10 @@ def _dispatch_group_feedback_posts(
     *,
     single_author_impact_penalty: int,
 ) -> None:
-    """Post or enqueue up to two feedback-ranking messages for one group."""
+    """Post or enqueue feedback-ranking messages for one group (count from adaptive control)."""
     feedback_post_links = select_top_ranked_for_feedback_posts(
         batch.title_link_scores,
+        max_posts=batch.max_posts,
         single_author_impact_penalty=single_author_impact_penalty,
     )
     if not feedback_post_links:
@@ -415,6 +418,7 @@ def process_group(
     openalex_cfg: dict,
     dryrun: bool,
     config_path: Path,
+    cfg: dict,
     *,
     kagi_prefilter_cap: int = 20,
     kagi_batch_size: int = 5,
@@ -442,6 +446,7 @@ def process_group(
     zulip_msgs: list[dict[str, Any]] = []
     feedback_signals: dict[str, tuple[int, int]] = {}
     feedback_msgs_by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    feedback_max_posts = MAX_FEEDBACK_RANKING_POSTS_PER_GROUP
     if zulip_sources:
         if not zulip_realms:
             logger.warning(
@@ -452,6 +457,21 @@ def process_group(
             feedback_signals, feedback_msgs_by_pair = load_feedback_state_for_group(
                 zulip_sources, zulip_realms
             )
+            feedback_control = apply_feedback_control_for_group(
+                config_path,
+                cfg,
+                group_name=group_name,
+                base_relevance=relevance_threshold,
+                base_impact=impact_threshold,
+                period_hours=int(period),
+                zulip_sources=zulip_sources,
+                messages_by_pair=feedback_msgs_by_pair,
+                zulip_realms=zulip_realms,
+                zulip_cfg=zulip_cfg,
+            )
+            relevance_threshold = feedback_control.effective_relevance
+            impact_threshold = feedback_control.effective_impact
+            feedback_max_posts = feedback_control.max_enqueue
             comments_block = build_team_comments_block(
                 feedback_msgs_by_pair, zulip_realms
             )
@@ -677,6 +697,7 @@ def process_group(
             single_author_impact_penalty=max(
                 0, int(group.get("single_author_impact_penalty", 1))
             ),
+            max_posts=feedback_max_posts,
         )
 
     link_scores = [(str(a.link), r.relevance, r.impact) for a, r in passing]
@@ -787,6 +808,7 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                     openalex_cfg,
                     dryrun,
                     config_path,
+                    cfg,
                     kagi_prefilter_cap=pf_cap,
                     kagi_batch_size=batch_sz,
                     openrouter=openrouter,
