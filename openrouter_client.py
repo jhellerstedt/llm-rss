@@ -14,7 +14,7 @@ from api_usage import record_openrouter_http
 logger = logging.getLogger(__name__)
 
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "anthropic/claude-3-5-haiku"
+DEFAULT_MODEL = "~anthropic/claude-haiku-latest"
 
 _SCORE_SYSTEM_PROMPT = (
     "You are an academic paper evaluator curating an RSS feed. "
@@ -145,6 +145,15 @@ class OpenRouterClient:
                 r.raise_for_status()
             except requests.HTTPError as e:
                 last_exc = e
+                if 400 <= r.status_code < 500:
+                    detail = (r.text or "").strip()
+                    if detail:
+                        logger.error(
+                            "OpenRouter HTTP %s for model=%s: %s",
+                            r.status_code,
+                            payload.get("model"),
+                            detail[:500],
+                        )
                 if 500 <= r.status_code < 600 and attempt < self.max_retries:
                     delay = min(60.0, (2 ** (attempt - 1))) + random.random()
                     logger.warning(

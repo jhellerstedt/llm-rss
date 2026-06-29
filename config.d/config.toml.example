@@ -20,7 +20,7 @@ scoring_batch_size = 5
 
 [openrouter]
 # api_key = "your-openrouter-key"  # prefer OPENROUTER_API_KEY in .env (see .env.example)
-# model = "anthropic/claude-3-5-haiku"  # see https://openrouter.ai/models
+# model = "~anthropic/claude-haiku-latest"  # always tracks latest Haiku; see https://openrouter.ai/models
 # timeout = 60
 # site_url = "https://yourserver.example.com"
 # site_name = "llm-rss"
@@ -59,6 +59,20 @@ context_max_chars = 12000
 # feedback_ranking_use_queue = true
 # Optional queue file path (relative to this TOML's directory; default: <stem>.feedback_ranking_queue.json).
 # feedback_ranking_queue_file = "data/feedback_ranking_queue.json"
+
+# Post a deduplicated WARNING/ERROR summary to Zulip when a run hits issues (skipped when clean).
+# [zulip.error_reporting]
+# enabled = true
+# topic = "llm-rss run"
+# realm = "myrealm"
+# stream = "llm errors"
+# Or multiple realms (same summary posted to each):
+# [[zulip.error_reporting.destinations]]
+# realm = "realm_a"
+# stream = "llm errors"
+# [[zulip.error_reporting.destinations]]
+# realm = "realm_b"
+# stream = "llm errors"
 
 # Adaptive feedback control (requires groups with zulip_sources). Adjusts each group's
 # effective relevance/impact thresholds from recent :+1:/:-1: reactions (target 80% +1)

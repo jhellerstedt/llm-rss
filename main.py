@@ -77,6 +77,7 @@ from zulip_journal_suggestions import (
     new_feed_urls_from_filtered_nested,
 )
 from zulip_journal_weekly_summary import maybe_post_weekly_journal_config_summary
+from zulip_run_error_report import RunLogCollector, maybe_post_run_error_summary
 from author_whitelist import AuthorWhitelist, force_included_whitelist_items
 from author_whitelist_bot import run_author_whitelist_bot
 
@@ -719,6 +720,10 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
     reset_api_usage_stats()
     reset_kagi_session_quota()
     reset_openrouter_usage()
+    log_collector = RunLogCollector()
+    log_collector.attach()
+    zulip_cfg: dict = {}
+    zulip_realms: dict = {}
     try:
         cfg = toml.load(config_path)
         openalex_cfg = dict(cfg.get("openalex") or {})
@@ -749,7 +754,7 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 route_to_openrouter or "(none)",
             )
 
-        zulip_cfg = cfg.get("zulip") or {}
+        zulip_cfg = dict(cfg.get("zulip") or {})
         realms_path_cfg = zulip_cfg.get("realms_config_file")
         if realms_path_cfg:
             rp = Path(realms_path_cfg)
@@ -1072,6 +1077,17 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 or_usage.get("input_tokens", 0),
                 or_usage.get("output_tokens", 0),
             )
+        try:
+            maybe_post_run_error_summary(
+                collector=log_collector,
+                config_path=config_path,
+                zulip_cfg=zulip_cfg,
+                zulip_realms=zulip_realms,
+                dryrun=dryrun,
+            )
+        except Exception:
+            logger.exception("Zulip run error summary step failed")
+        log_collector.detach()
 
 
 def _dispatch_feedback_queue_configs(

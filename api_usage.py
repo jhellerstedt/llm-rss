@@ -83,6 +83,20 @@ def record_rss_page_fetch(n: int = 1) -> None:
         _rss_page += n
 
 
+def get_api_usage_snapshot() -> dict[str, int]:
+    """Return current API call counters (for run summaries)."""
+    with _lock:
+        return {
+            "kagi_fastgpt": _kagi_fastgpt,
+            "kagi_summarize": _kagi_summarize,
+            "openrouter": _openrouter,
+            "openalex": _openalex,
+            "zulip": _zulip,
+            "rss_feed": _rss_feed,
+            "rss_page": _rss_page,
+        }
+
+
 def log_api_usage_summary(logger: logging.Logger | None = None) -> None:
     """Emit a single INFO line suitable for log files (e.g. update_llm_rss.sh tee)."""
     log = logger or logging.getLogger(__name__)
