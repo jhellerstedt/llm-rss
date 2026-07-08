@@ -33,6 +33,7 @@ class FeedbackControlSettings:
     ratio_min_samples: int = 5
     max_threshold_margin: int = 3
     max_enqueue_per_run: int = 2
+    min_enqueue_when_backlogged: int = 1
     target_queue_depth: int = 2
     margin_step: int = 1
     ratio_deadband: float = 0.10
@@ -49,6 +50,9 @@ class FeedbackControlSettings:
             ratio_min_samples=int(raw.get("ratio_min_samples", 5)),
             max_threshold_margin=int(raw.get("max_threshold_margin", 3)),
             max_enqueue_per_run=int(raw.get("max_enqueue_per_run", 2)),
+            min_enqueue_when_backlogged=int(
+                raw.get("min_enqueue_when_backlogged", 1)
+            ),
             target_queue_depth=int(raw.get("target_queue_depth", 2)),
             margin_step=int(raw.get("margin_step", 1)),
             ratio_deadband=float(raw.get("ratio_deadband", 0.10)),
@@ -219,6 +223,11 @@ def compute_feedback_control(
         target_enqueue *= 0.5
 
     max_enqueue = int(round(max(0.0, min(target_enqueue, settings.max_enqueue_per_run))))
+    if (
+        queue_depth > 0
+        and max_enqueue < settings.min_enqueue_when_backlogged
+    ):
+        max_enqueue = settings.min_enqueue_when_backlogged
 
     return FeedbackControlResult(
         threshold_margin=margin,

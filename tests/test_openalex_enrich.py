@@ -398,5 +398,42 @@ class TestMergeAndFallback(unittest.TestCase):
         self.assertIn("B1", format_enrichment_for_feed(by_link[str(a2.link)]))
 
 
+class TestOpenAlexHttp(unittest.TestCase):
+    @patch("openalex_enrich.requests.get")
+    def test_get_json_retries_on_429(self, mock_get: unittest.mock.MagicMock) -> None:
+        rate_limited = unittest.mock.MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "0"}
+        ok = unittest.mock.MagicMock()
+        ok.status_code = 200
+        ok.json.return_value = {"id": "https://openalex.org/W1"}
+        mock_get.side_effect = [rate_limited, ok]
+        from openalex_enrich import _get_json
+
+        with patch("openalex_enrich.time.sleep"):
+            data = _get_json("https://api.openalex.org/works/W1", "t@example.com")
+        self.assertEqual(data, {"id": "https://openalex.org/W1"})
+        self.assertEqual(mock_get.call_count, 2)
+
+    def test_author_cache_round_trip(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from openalex_enrich import (
+            AuthorMetric,
+            _load_author_metric_cache,
+            _save_author_metric_cache,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            _save_author_metric_cache(
+                path, {"A1": AuthorMetric("Ada", 12)}
+            )
+            loaded = _load_author_metric_cache(path)
+            self.assertEqual(loaded["A1"].display_name, "Ada")
+            self.assertEqual(loaded["A1"].h_index, 12)
+
+
 if __name__ == "__main__":
     unittest.main()

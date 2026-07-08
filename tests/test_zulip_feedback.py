@@ -149,6 +149,34 @@ class TestZulipFeedbackAggregate(unittest.TestCase):
         ]
         self.assertTrue(feedback_ranking_ready_for_next_post(with_rx))
 
+    def test_feedback_ranking_ready_after_reaction_timeout(self) -> None:
+        url = "https://arxiv.org/abs/2401.00004"
+        now = 1_700_000_000
+        stale = [
+            {
+                "content": f"P\n\nLink: {url}",
+                "reactions": [],
+                "timestamp": now - 72 * 3600,
+            }
+        ]
+        self.assertTrue(
+            feedback_ranking_ready_for_next_post(
+                stale, reaction_timeout_hours=48.0, now_ts=now
+            )
+        )
+        fresh = [
+            {
+                "content": f"P\n\nLink: {url}",
+                "reactions": [],
+                "timestamp": now - 2 * 3600,
+            }
+        ]
+        self.assertFalse(
+            feedback_ranking_ready_for_next_post(
+                fresh, reaction_timeout_hours=48.0, now_ts=now
+            )
+        )
+
     def test_merge_signal_maps(self) -> None:
         kx = normalize_link("https://x.org/foo")
         ky = normalize_link("https://y.org/bar")

@@ -15,8 +15,10 @@ from zulip_context import fetch_messages_narrow, _client_for_realm
 from zulip_feedback import (
     FEEDBACK_RANKING_TOPIC,
     bot_identity_for_realm,
+    count_thumbs_reactions,
     feedback_ranking_ready_for_next_post,
     format_feedback_post_body,
+    latest_feedback_ranking_message,
     links_announced_in_messages,
     lookback_max_for_pair,
     unique_realm_stream_pairs,
@@ -249,6 +251,17 @@ def enqueue_feedback_ranking_for_group(
     return added
 
 
+def _feedback_reaction_timeout_hours(zulip_cfg: dict[str, Any]) -> float | None:
+    raw = zulip_cfg.get("feedback_ranking_reaction_timeout_hours")
+    if raw is None:
+        return 48.0
+    try:
+        hours = float(raw)
+    except (TypeError, ValueError):
+        return 48.0
+    return hours if hours > 0 else None
+
+
 def dispatch_feedback_ranking_queue_once(
     config_path: Path,
     cfg: dict[str, Any],
@@ -258,6 +271,7 @@ def dispatch_feedback_ranking_queue_once(
 ) -> None:
     """For each (realm, stream) with backlog, process at most one head item (pop if posted or sent)."""
     zulip_cfg = dict(cfg.get("zulip") or {})
+    reaction_timeout_hours = _feedback_reaction_timeout_hours(zulip_cfg)
     path = feedback_ranking_queue_path(config_path, zulip_cfg)
     if not path.exists():
         logger.debug("No feedback ranking queue file at %s", path)
@@ -316,7 +330,12 @@ def dispatch_feedback_ranking_queue_once(
                     stream,
                 )
                 continue
-            if not feedback_ranking_ready_for_next_post(msgs, bot_email, bot_name):
+            if not feedback_ranking_ready_for_next_post(
+                msgs,
+                bot_email,
+                bot_name,
+                reaction_timeout_hours=reaction_timeout_hours,
+            ):
                 logger.info(
                     "Feedback queue: waiting for reaction on previous post "
                     "realm=%s stream=%s",
@@ -324,6 +343,17 @@ def dispatch_feedback_ranking_queue_once(
                     stream,
                 )
                 continue
+            latest = latest_feedback_ranking_message(msgs, bot_email, bot_name)
+            if latest is not None and reaction_timeout_hours:
+                up, down = count_thumbs_reactions(latest)
+                if (up + down) == 0:
+                    logger.info(
+                        "Feedback queue: posting without reaction (timeout %.0fh) "
+                        "realm=%s stream=%s",
+                        reaction_timeout_hours,
+                        realm,
+                        stream,
+                    )
             body = format_feedback_post_body(title, link, en)
             if dryrun:
                 logger.info(

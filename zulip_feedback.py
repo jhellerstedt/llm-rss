@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -206,21 +207,41 @@ def latest_feedback_ranking_message(
     return None
 
 
+def _normalize_message_ts(ts: int | float) -> int:
+    t = int(ts)
+    return t // 1000 if t > 10_000_000_000 else t
+
+
 def feedback_ranking_ready_for_next_post(
     messages: list[dict[str, Any]],
     bot_email: str | None = None,
     bot_name: str | None = None,
+    *,
+    reaction_timeout_hours: float | None = None,
+    now_ts: int | float | None = None,
 ) -> bool:
     """True when there is no prior bot post, or the latest bot post has a thumbs reaction.
 
     Reactions are read only from the bot's own messages; teammate replies in the topic
     never gate the queue (they feed scoring context instead).
+
+    When ``reaction_timeout_hours`` is set and the latest post is older than that window
+    without reactions, returns True so a stalled queue can advance.
     """
     latest = latest_feedback_ranking_message(messages, bot_email, bot_name)
     if latest is None:
         return True
     up, down = count_thumbs_reactions(latest)
-    return (up + down) > 0
+    if (up + down) > 0:
+        return True
+    if reaction_timeout_hours is None or reaction_timeout_hours <= 0:
+        return False
+    posted_at = _normalize_message_ts(latest.get("timestamp") or 0)
+    if posted_at <= 0:
+        return False
+    now = _normalize_message_ts(now_ts if now_ts is not None else time.time())
+    age_hours = (now - posted_at) / 3600
+    return age_hours >= reaction_timeout_hours
 
 
 def merge_signal_maps(

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
 
@@ -28,6 +32,34 @@ _MAX_PLAUSIBLE_AUTHOR_H_INDEX = 400
 
 OPENALEX_BASE = "https://api.openalex.org"
 _HTTP_HEADERS = {"User-Agent": "llm-rss/openalex-enrich"}
+_AUTHOR_CACHE_VERSION = 1
+_AUTHOR_CACHE_TTL_SECONDS = 7 * 86400
+_DEFAULT_REQUESTS_PER_SECOND = 8.0
+_DEFAULT_MAX_AUTHOR_WORKERS = 2
+_DEFAULT_MAX_AUTHOR_FETCHES_PER_RUN = 80
+_OPENALEX_MAX_RETRIES = 5
+
+
+class _OpenAlexRateLimiter:
+    """Serialize OpenAlex HTTP pacing across worker threads."""
+
+    def __init__(self, requests_per_second: float) -> None:
+        rps = max(0.1, float(requests_per_second))
+        self._interval = 1.0 / rps
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            delay = self._next_allowed - now
+            if delay > 0:
+                time.sleep(delay)
+                now = time.monotonic()
+            self._next_allowed = now + self._interval
+
+
+_rate_limiter = _OpenAlexRateLimiter(_DEFAULT_REQUESTS_PER_SECOND)
 
 _ARXIV_NEW = re.compile(
     r"arxiv\.org/(?:abs|pdf)/(?P<id>\d{4}\.\d{4,5})(?:v\d+)?",
@@ -454,25 +486,135 @@ def _authors_api_path(author_openalex_id_url: str) -> str:
     return f"{OPENALEX_BASE}/authors/{tail}"
 
 
-def _get_json(url: str, mailto: str) -> Any | None:
-    params: dict[str, str | int] = {}
-    if mailto:
-        params["mailto"] = mailto
+def _author_cache_key(author_openalex_id_url: str) -> str:
+    return author_openalex_id_url.rstrip("/").split("/")[-1]
+
+
+def _load_author_metric_cache(
+    path: Path | None,
+    *,
+    ttl_seconds: int = _AUTHOR_CACHE_TTL_SECONDS,
+) -> dict[str, AuthorMetric]:
+    if path is None or not path.exists():
+        return {}
     try:
-        record_openalex_http(1)
-        r = requests.get(
-            url, params=params, timeout=25, headers=_HTTP_HEADERS
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.debug("OpenAlex author cache unreadable at %s; starting fresh", path)
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    authors = doc.get("authors")
+    if not isinstance(authors, dict):
+        return {}
+    now = time.time()
+    out: dict[str, AuthorMetric] = {}
+    for key, row in authors.items():
+        if not isinstance(row, dict):
+            continue
+        try:
+            cached_at = float(row.get("cached_at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cached_at <= 0 or (now - cached_at) > ttl_seconds:
+            continue
+        raw_h = row.get("h_index")
+        h: int | None
+        if raw_h is None:
+            h = None
+        else:
+            try:
+                h = int(raw_h)
+            except (TypeError, ValueError):
+                h = None
+        out[str(key)] = AuthorMetric(
+            display_name=str(row.get("display_name") or "Unknown"),
+            h_index=h,
         )
-        if r.status_code == 404:
-            logger.debug(
-                "OpenAlex not found (404): %s", url.split("?", 1)[0]
+    return out
+
+
+def _save_author_metric_cache(
+    path: Path | None,
+    metrics: dict[str, AuthorMetric],
+    *,
+    prior: dict[str, AuthorMetric] | None = None,
+) -> None:
+    if path is None:
+        return
+    merged = dict(prior or {})
+    merged.update(metrics)
+    now = time.time()
+    authors: dict[str, dict[str, Any]] = {}
+    for key, metric in merged.items():
+        authors[key] = {
+            "display_name": metric.display_name,
+            "h_index": metric.h_index,
+            "cached_at": now,
+        }
+    doc = {"version": _AUTHOR_CACHE_VERSION, "authors": authors}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    except OSError as e:
+        logger.warning("OpenAlex author cache write failed %s: %s", path, e)
+
+
+def configure_openalex_rate_limit(requests_per_second: float) -> None:
+    global _rate_limiter
+    _rate_limiter = _OpenAlexRateLimiter(requests_per_second)
+
+
+def _get_json(
+    url: str,
+    mailto: str,
+    *,
+    params: dict[str, str | int] | None = None,
+    max_retries: int = _OPENALEX_MAX_RETRIES,
+) -> Any | None:
+    merged: dict[str, str | int] = dict(params or {})
+    if mailto:
+        merged["mailto"] = mailto
+    last_error: Exception | None = None
+    for attempt in range(max(1, max_retries)):
+        _rate_limiter.wait()
+        try:
+            record_openalex_http(1)
+            r = requests.get(
+                url, params=merged, timeout=25, headers=_HTTP_HEADERS
             )
-            return None
-        r.raise_for_status()
-        return r.json()
-    except requests.RequestException as e:
-        logger.warning("OpenAlex request failed %s: %s", url, e)
-        return None
+            if r.status_code == 404:
+                logger.debug(
+                    "OpenAlex not found (404): %s", url.split("?", 1)[0]
+                )
+                return None
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    delay = max(1, int(retry_after)) if retry_after else 0
+                except (TypeError, ValueError):
+                    delay = 0
+                if delay <= 0:
+                    delay = min(2**attempt, 30)
+                logger.info(
+                    "OpenAlex rate limited (429) on %s; retry in %ss (attempt %d/%d)",
+                    url.split("?", 1)[0],
+                    delay,
+                    attempt + 1,
+                    max_retries,
+                )
+                time.sleep(delay)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as e:
+            last_error = e
+            if attempt + 1 < max_retries:
+                time.sleep(min(2**attempt, 10))
+                continue
+    if last_error is not None:
+        logger.warning("OpenAlex request failed %s: %s", url, last_error)
+    return None
 
 
 def fetch_work(article: ArticleInfo, mailto: str) -> Any | None:
@@ -484,21 +626,12 @@ def fetch_work(article: ArticleInfo, mailto: str) -> Any | None:
     title = article.title.strip()
     if not title:
         return None
-    params: dict[str, str | int] = {"search": title, "per_page": 5}
-    if mailto:
-        params["mailto"] = mailto
-    try:
-        record_openalex_http(1)
-        r = requests.get(
-            f"{OPENALEX_BASE}/works",
-            params=params,
-            timeout=25,
-            headers=_HTTP_HEADERS,
-        )
-        r.raise_for_status()
-        payload = r.json()
-    except Exception as e:
-        logger.warning("OpenAlex works search failed for %r: %s", title[:80], e)
+    payload = _get_json(
+        f"{OPENALEX_BASE}/works",
+        mailto,
+        params={"search": title, "per_page": 5},
+    )
+    if not isinstance(payload, dict):
         return None
     for w in payload.get("results") or []:
         wt = w.get("title") or ""
@@ -512,27 +645,39 @@ def fetch_work(article: ArticleInfo, mailto: str) -> Any | None:
     return None
 
 
-def fetch_author_metric(author_openalex_id_url: str, mailto: str) -> AuthorMetric:
+def fetch_author_metric(
+    author_openalex_id_url: str,
+    mailto: str,
+    *,
+    cache: dict[str, AuthorMetric] | None = None,
+) -> AuthorMetric:
+    key = _author_cache_key(author_openalex_id_url)
+    if cache is not None and key in cache:
+        return cache[key]
     url = _authors_api_path(author_openalex_id_url)
     data = _get_json(url, mailto)
     if not data:
-        return AuthorMetric(display_name="", h_index=None)
-    name = str(data.get("display_name") or "").strip()
-    stats = data.get("summary_stats") or {}
-    h: int | None
-    if "h_index" not in stats:
-        h = None
+        metric = AuthorMetric(display_name="", h_index=None)
     else:
-        raw = stats.get("h_index")
-        if raw is None:
+        name = str(data.get("display_name") or "").strip()
+        stats = data.get("summary_stats") or {}
+        h: int | None
+        if "h_index" not in stats:
             h = None
         else:
-            try:
-                h = int(raw)
-            except (TypeError, ValueError):
+            raw = stats.get("h_index")
+            if raw is None:
                 h = None
-    plausible: int | None = None if h is None else _plausible_author_h_index(h)
-    return AuthorMetric(display_name=name or "Unknown", h_index=plausible)
+            else:
+                try:
+                    h = int(raw)
+                except (TypeError, ValueError):
+                    h = None
+        plausible: int | None = None if h is None else _plausible_author_h_index(h)
+        metric = AuthorMetric(display_name=name or "Unknown", h_index=plausible)
+    if cache is not None:
+        cache[key] = metric
+    return metric
 
 
 def affiliation_for_authorship(a: dict[str, Any]) -> str:
@@ -629,11 +774,19 @@ def batch_enrich_articles(
     articles: list[ArticleInfo],
     mailto: str,
     max_work_workers: int = 3,
-    max_author_workers: int = 6,
+    max_author_workers: int = _DEFAULT_MAX_AUTHOR_WORKERS,
+    *,
+    max_author_fetches_per_run: int = _DEFAULT_MAX_AUTHOR_FETCHES_PER_RUN,
+    author_cache_path: Path | str | None = None,
+    requests_per_second: float = _DEFAULT_REQUESTS_PER_SECOND,
 ) -> dict[str, PaperEnrichment | None]:
     """Map article link -> structured metadata from OpenAlex (None if work not resolved)."""
     if not articles:
         return {}
+
+    configure_openalex_rate_limit(requests_per_second)
+    cache_file = Path(author_cache_path) if author_cache_path else None
+    author_cache = _load_author_metric_cache(cache_file)
 
     link_to_work: dict[str, dict[str, Any] | None] = {}
 
@@ -645,29 +798,65 @@ def batch_enrich_articles(
         for f in futs:
             f.result()
 
-    author_ids: set[str] = set()
+    author_ids: list[str] = []
+    seen_author_ids: set[str] = set()
     for w in link_to_work.values():
         if not w:
             continue
         for a in w.get("authorships") or []:
             aid = (a.get("author") or {}).get("id")
-            if aid:
-                author_ids.add(str(aid))
+            if not aid:
+                continue
+            aid_s = str(aid)
+            if aid_s in seen_author_ids:
+                continue
+            seen_author_ids.add(aid_s)
+            author_ids.append(aid_s)
+
+    to_fetch = [
+        aid
+        for aid in author_ids
+        if _author_cache_key(aid) not in author_cache
+    ]
+    cap = max(0, int(max_author_fetches_per_run))
+    if cap and len(to_fetch) > cap:
+        logger.info(
+            "OpenAlex: capping author fetches to %d (%d unique authors, %d cached)",
+            cap,
+            len(author_ids),
+            len(author_ids) - len(to_fetch),
+        )
+        to_fetch = to_fetch[:cap]
 
     metrics: dict[str, AuthorMetric] = {}
+    for aid in author_ids:
+        key = _author_cache_key(aid)
+        if key in author_cache:
+            metrics[aid] = author_cache[key]
 
     def load_author(aid: str) -> None:
-        metrics[aid] = fetch_author_metric(aid, mailto)
+        metrics[aid] = fetch_author_metric(aid, mailto, cache=author_cache)
 
-    with ThreadPoolExecutor(max_workers=max(1, max_author_workers)) as pool:
-        futs = {pool.submit(load_author, aid): aid for aid in author_ids}
-        for fut in as_completed(futs):
-            try:
-                fut.result()
-            except Exception as e:
-                aid = futs[fut]
-                logger.warning("OpenAlex author worker failed %s: %s", aid, e)
-                metrics[aid] = AuthorMetric(display_name="Unknown", h_index=None)
+    if to_fetch:
+        with ThreadPoolExecutor(max_workers=max(1, max_author_workers)) as pool:
+            futs = {pool.submit(load_author, aid): aid for aid in to_fetch}
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                except Exception as e:
+                    aid = futs[fut]
+                    logger.warning("OpenAlex author worker failed %s: %s", aid, e)
+                    metrics[aid] = AuthorMetric(display_name="Unknown", h_index=None)
+
+    for aid in author_ids:
+        if aid not in metrics:
+            metrics[aid] = author_cache.get(
+                _author_cache_key(aid),
+                AuthorMetric(display_name="Unknown", h_index=None),
+            )
+
+    if cache_file is not None and to_fetch:
+        _save_author_metric_cache(cache_file, author_cache)
 
     out: dict[str, PaperEnrichment | None] = {}
     for art in articles:

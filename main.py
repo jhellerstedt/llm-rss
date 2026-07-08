@@ -643,9 +643,26 @@ def process_group(
     enrichment_by_link: dict[str, PaperEnrichment | None] = {}
     if passing:
         if openalex_enabled:
+            cache_rel = openalex_cfg.get("author_cache_file")
+            cache_path: Path | None = None
+            if cache_rel:
+                cache_path = Path(str(cache_rel))
+                if not cache_path.is_absolute():
+                    cache_path = (config_path.parent / cache_path).resolve()
             enrichment_by_link = batch_enrich_articles(
                 [a for a, _ in passing],
                 mailto=openalex_mailto,
+                max_work_workers=int(openalex_cfg.get("max_work_workers", 3)),
+                max_author_workers=int(
+                    openalex_cfg.get("max_author_workers", 2)
+                ),
+                max_author_fetches_per_run=int(
+                    openalex_cfg.get("max_author_fetches_per_run", 80)
+                ),
+                author_cache_path=cache_path,
+                requests_per_second=float(
+                    openalex_cfg.get("requests_per_second", 8.0)
+                ),
             )
         else:
             enrichment_by_link = {str(a.link): None for a, _ in passing}

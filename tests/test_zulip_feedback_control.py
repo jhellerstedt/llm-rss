@@ -27,6 +27,7 @@ class TestFeedbackControlConfig(unittest.TestCase):
         self.assertEqual(s.ratio_min_samples, 5)
         self.assertEqual(s.max_threshold_margin, 3)
         self.assertEqual(s.max_enqueue_per_run, 2)
+        self.assertEqual(s.min_enqueue_when_backlogged, 1)
         self.assertEqual(s.target_queue_depth, 2)
         self.assertEqual(s.margin_step, 1)
         self.assertEqual(s.ratio_deadband, 0.10)
@@ -161,6 +162,26 @@ class TestFeedbackControlLogic(unittest.TestCase):
             up_ratio=0.80,
             ratio_sample_count=0,
             consumption_posts_per_day=2.0,
+        )
+        self.assertEqual(result.max_enqueue, 1)
+
+    def test_enqueue_floor_when_queue_backlogged(self) -> None:
+        settings = FeedbackControlSettings(
+            max_enqueue_per_run=2,
+            min_enqueue_when_backlogged=1,
+            target_queue_depth=2,
+        )
+        result = compute_feedback_control(
+            group_name="g1",
+            base_relevance=5,
+            base_impact=3,
+            period_hours=4,
+            queue_depth=66,
+            prior_margin=3,
+            settings=settings,
+            up_ratio=0.33,
+            ratio_sample_count=3,
+            consumption_posts_per_day=0.43,
         )
         self.assertEqual(result.max_enqueue, 1)
 

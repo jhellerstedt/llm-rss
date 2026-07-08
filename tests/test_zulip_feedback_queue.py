@@ -247,6 +247,7 @@ class TestDispatchQueue(unittest.TestCase):
         }
         qpath.write_text(json.dumps(doc), encoding="utf-8")
         cfg = {
+            "zulip": {"feedback_ranking_reaction_timeout_hours": 0},
             "groups": [
                 {
                     "zulip_sources": [
@@ -302,6 +303,55 @@ class TestDispatchQueue(unittest.TestCase):
                 "content": f"Prev\n\nLink: {prev_url}",
                 "reactions": [{"emoji_name": "+1", "user_id": 2}],
                 "timestamp": 1,
+            },
+        ]
+        fake_client = MagicMock()
+        fake_client.send_message.return_value = {"result": "success"}
+        with patch(
+            "zulip_feedback_queue.fetch_messages_narrow", return_value=topic_msgs
+        ), patch(
+            "zulip_feedback_queue._client_for_realm", return_value=fake_client
+        ):
+            dispatch_feedback_ranking_queue_once(
+                self.cfg_path, cfg, {"r1": {}}, dryrun=False
+            )
+        fake_client.send_message.assert_called_once()
+        after = json.loads(qpath.read_text(encoding="utf-8"))
+        self.assertEqual(after["queues"], [])
+
+    def test_posts_after_reaction_timeout_without_emoji(self) -> None:
+        prev_url = "https://arxiv.org/abs/2401.00020"
+        next_url = "https://arxiv.org/abs/2401.00021"
+        qpath = feedback_ranking_queue_path(self.cfg_path, {})
+        doc = {
+            "version": 1,
+            "queues": [
+                {
+                    "realm": "r1",
+                    "stream": "general",
+                    "pending": [
+                        {"title": "Next", "link": next_url, "enrichment": None},
+                    ],
+                }
+            ],
+        }
+        qpath.write_text(json.dumps(doc), encoding="utf-8")
+        now = 1_700_000_000
+        cfg = {
+            "zulip": {"feedback_ranking_reaction_timeout_hours": 48},
+            "groups": [
+                {
+                    "zulip_sources": [
+                        {"realm": "R1", "stream": "general", "lookback_hours": 24}
+                    ]
+                }
+            ],
+        }
+        topic_msgs = [
+            {
+                "content": f"Prev\n\nLink: {prev_url}",
+                "reactions": [],
+                "timestamp": now - 50 * 3600,
             },
         ]
         fake_client = MagicMock()
