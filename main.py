@@ -394,6 +394,7 @@ def _dispatch_group_feedback_posts(
             group_name=batch.group_name,
             dryrun=dryrun,
             zulip_realms=zulip_realms,
+            feed_category=batch.feed_category,
         )
     else:
         logger.info(
@@ -408,6 +409,11 @@ def _dispatch_group_feedback_posts(
             messages_by_pair=batch.messages_by_pair,
             titles_and_links=feedback_post_links,
             dryrun=dryrun,
+            max_sends_per_group=batch.max_posts,
+            config_path=config_path,
+            zulip_cfg=zulip_cfg,
+            group_name=batch.group_name,
+            feed_category=batch.feed_category,
         )
 
 
@@ -716,6 +722,12 @@ def process_group(
                 0, int(group.get("single_author_impact_penalty", 1))
             ),
             max_posts=feedback_max_posts,
+            feed_category=_normalize_feed_category(
+                group.get("feed_category")
+                or group.get("category")
+                or cfg.get("feed_category")
+                or cfg.get("category")
+            ),
         )
 
     link_scores = [(str(a.link), r.relevance, r.impact) for a, r in passing]

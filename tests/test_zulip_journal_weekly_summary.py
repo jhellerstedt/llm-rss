@@ -199,6 +199,75 @@ class TestMarkdownConfigDiff(unittest.TestCase):
         md_other = markdown_config_diff(before, after, allowed_bucket_ids=frozenset({"g:other"}))
         self.assertEqual(md_other, "")
 
+    def test_stats_only_section(self) -> None:
+        before = {
+            "mode": "groups",
+            "groups": [
+                {
+                    "name": "g1",
+                    "feed_category": "cm",
+                    "urls": ["https://a/rss"],
+                    "research_areas": [],
+                    "excluded_areas": [],
+                }
+            ],
+        }
+        after = before
+        stats = {
+            "c:cm": {
+                "title": "cm",
+                "kind": "category",
+                "enqueued": 3,
+                "posted": 1,
+                "votes": (2, 1),
+            }
+        }
+        md = markdown_config_diff(before, after, stats_by_bucket=stats)
+        self.assertIn("Category `cm`", md)
+        self.assertIn("**Queued:** 3", md)
+        self.assertIn("**Posted:** 1", md)
+        self.assertIn("**Votes:** ↑2 / ↓1", md)
+        self.assertNotIn("Journal feeds", md)
+
+    def test_config_and_stats_merged(self) -> None:
+        before = {
+            "mode": "groups",
+            "groups": [
+                {
+                    "name": "g1",
+                    "feed_category": "cm",
+                    "urls": ["https://a/rss"],
+                    "research_areas": [],
+                    "excluded_areas": [],
+                }
+            ],
+        }
+        after = {
+            "mode": "groups",
+            "groups": [
+                {
+                    "name": "g1",
+                    "feed_category": "cm",
+                    "urls": ["https://a/rss", "https://b/rss"],
+                    "research_areas": [],
+                    "excluded_areas": [],
+                }
+            ],
+        }
+        stats = {
+            "c:cm": {
+                "title": "cm",
+                "kind": "category",
+                "enqueued": 4,
+                "posted": 2,
+                "votes": (1, 0),
+            }
+        }
+        md = markdown_config_diff(before, after, stats_by_bucket=stats)
+        self.assertIn("Journal feeds:** 2", md)
+        self.assertIn("**Queued:** 4", md)
+        self.assertEqual(md.count("Category `cm`"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

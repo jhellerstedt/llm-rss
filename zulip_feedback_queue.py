@@ -23,6 +23,7 @@ from zulip_feedback import (
     lookback_max_for_pair,
     unique_realm_stream_pairs,
 )
+from zulip_feedback_weekly_stats import record_enqueued, record_posted, resolve_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -114,13 +115,24 @@ def _doc_to_by_pair(doc: dict[str, Any]) -> dict[tuple[str, str], list[dict[str,
             if not link:
                 continue
             en_raw = item.get("enrichment")
-            norm_pending.append(
-                {
-                    "title": title,
-                    "link": link,
-                    "enrichment": en_raw if isinstance(en_raw, dict) else None,
-                }
-            )
+            bucket_id = str(item.get("bucket_id") or "") or None
+            b_title = str(item.get("bucket_title") or "") or None
+            b_kind = str(item.get("kind") or "") or None
+            group_name = str(item.get("group_name") or "") or None
+            row: dict[str, Any] = {
+                "title": title,
+                "link": link,
+                "enrichment": en_raw if isinstance(en_raw, dict) else None,
+            }
+            if bucket_id:
+                row["bucket_id"] = bucket_id
+            if b_title:
+                row["bucket_title"] = b_title
+            if b_kind:
+                row["kind"] = b_kind
+            if group_name:
+                row["group_name"] = group_name
+            norm_pending.append(row)
         out[(realm, stream)] = norm_pending
     return out
 
@@ -131,18 +143,27 @@ def _by_pair_to_doc(by_pair: dict[tuple[str, str], list[dict[str, Any]]]) -> dic
         items = by_pair[(realm, stream)]
         if not items:
             continue
+        pending_out: list[dict[str, Any]] = []
+        for it in items:
+            row: dict[str, Any] = {
+                "title": it["title"],
+                "link": it["link"],
+                "enrichment": it.get("enrichment"),
+            }
+            if it.get("bucket_id"):
+                row["bucket_id"] = it["bucket_id"]
+            if it.get("bucket_title"):
+                row["bucket_title"] = it["bucket_title"]
+            if it.get("kind"):
+                row["kind"] = it["kind"]
+            if it.get("group_name"):
+                row["group_name"] = it["group_name"]
+            pending_out.append(row)
         queues.append(
             {
                 "realm": realm,
                 "stream": stream,
-                "pending": [
-                    {
-                        "title": it["title"],
-                        "link": it["link"],
-                        "enrichment": it.get("enrichment"),
-                    }
-                    for it in items
-                ],
+                "pending": pending_out,
             }
         )
     return {"version": QUEUE_VERSION, "queues": queues}
@@ -204,11 +225,19 @@ def enqueue_feedback_ranking_for_group(
     group_name: str,
     dryrun: bool,
     zulip_realms: dict[str, dict[str, str]] | None = None,
+    feed_category: str | None = None,
+    bucket_id: str | None = None,
+    bucket_title: str | None = None,
+    bucket_kind: str | None = None,
 ) -> int:
     """Append ranked items per (realm, stream) when not already posted or pending. Returns new row count."""
     if not titles_and_links or not zulip_sources:
         return 0
     realms = zulip_realms or {}
+    if bucket_id and bucket_title and bucket_kind:
+        bid, btitle, bkind = bucket_id, bucket_title, bucket_kind
+    else:
+        bid, btitle, bkind = resolve_bucket(group_name, feed_category)
     path = feedback_ranking_queue_path(config_path, zulip_cfg)
     existed_before = path.exists()
     added = 0
@@ -229,10 +258,25 @@ def enqueue_feedback_ranking_for_group(
                         "title": title,
                         "link": link,
                         "enrichment": paper_enrichment_to_json(enrichment),
+                        "bucket_id": bid,
+                        "bucket_title": btitle,
+                        "kind": bkind,
+                        "group_name": group_name,
                     }
                 )
                 pending_keys.add(k)
                 added += 1
+                if not dryrun:
+                    record_enqueued(
+                        config_path,
+                        zulip_cfg,
+                        realm=realm,
+                        stream=stream,
+                        bucket_id=bid,
+                        title=btitle,
+                        kind=bkind,
+                        dryrun=False,
+                    )
                 logger.info(
                     "Zulip feedback ranking queue: +1 realm=%s stream=%s link=%s group=%s dryrun=%s",
                     realm,
@@ -295,6 +339,13 @@ def dispatch_feedback_ranking_queue_once(
             en = paper_enrichment_from_json(
                 cand["enrichment"] if isinstance(cand.get("enrichment"), dict) else None
             )
+            cand_group = str(cand.get("group_name") or "uncategorized")
+            if cand.get("bucket_id") and cand.get("bucket_title") and cand.get("kind"):
+                cand_bid = str(cand["bucket_id"])
+                cand_btitle = str(cand["bucket_title"])
+                cand_bkind = str(cand["kind"])
+            else:
+                cand_bid, cand_btitle, cand_bkind = resolve_bucket(cand_group, None)
             lookback, max_msg = lookback_max_for_pair(zulip_sources_all, realm, stream)
             try:
                 client = _client_for_realm(zulip_realms, realm)
@@ -382,6 +433,17 @@ def dispatch_feedback_ranking_queue_once(
                     continue
                 record_zulip_api(1)
                 by_pair[(realm, stream)] = pending[1:]
+                record_posted(
+                    config_path,
+                    zulip_cfg,
+                    realm=realm,
+                    stream=stream,
+                    bucket_id=cand_bid,
+                    title=cand_btitle,
+                    kind=cand_bkind,
+                    link=link,
+                    dryrun=False,
+                )
                 logger.info(
                     "Feedback queue: posted realm=%s stream=%s link=%s",
                     realm,

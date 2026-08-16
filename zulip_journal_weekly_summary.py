@@ -10,7 +10,16 @@ from typing import Any
 
 from api_usage import record_zulip_api
 from zulip_context import _client_for_realm, fetch_messages_narrow
-from zulip_feedback import unique_realm_stream_pairs
+from zulip_feedback import FEEDBACK_RANKING_TOPIC, unique_realm_stream_pairs
+from zulip_feedback_weekly_stats import (
+    aggregate_votes_for_stream,
+    collect_stats_by_bucket,
+    counters_for_stream,
+    format_stats_bullets,
+    load_stats,
+    feedback_weekly_stats_path,
+    reset_period_after_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,43 +137,118 @@ def _markdown_groups_compact(
     after: dict[str, Any],
     *,
     allowed_bucket_ids: frozenset[str] | None = None,
+    stats_by_bucket: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     before = _backfill_group_feed_categories(before, after)
     b_ag = _aggregate_group_buckets(before)
     a_ag = _aggregate_group_buckets(after)
+    stats_by_bucket = stats_by_bucket or {}
     lines: list[str] = []
-    all_ids = sorted(set(b_ag) | set(a_ag), key=lambda bid: (0 if bid.startswith("c:") else 1, bid))
+    all_ids = sorted(
+        set(b_ag) | set(a_ag) | set(stats_by_bucket),
+        key=lambda bid: (0 if bid.startswith("c:") else 1, bid),
+    )
     changed = False
     for bid in all_ids:
         if allowed_bucket_ids is not None and bid not in allowed_bucket_ids:
             continue
         b = b_ag.get(bid)
         a = a_ag.get(bid)
-        if b is None and a is None:
+        s = stats_by_bucket.get(bid)
+        if b is None and a is None and s is None:
             continue
-        kind = (a or b)["kind"]
-        title = (a or b)["title"]
+        if a or b:
+            kind = (a or b)["kind"]
+            title = (a or b)["title"]
+        else:
+            kind = str(s["kind"])
+            title = str(s["title"])
         feeds_b = len(b["urls"]) if b else 0
-        feeds_a = len(a["urls"]) if a else 0
+        feeds_a = len(a["urls"]) if a else (feeds_b if b else 0)
         kw_b = b["kw"] if b else 0
-        kw_a = a["kw"] if a else 0
+        kw_a = a["kw"] if a else (kw_b if b else 0)
         urls_b = frozenset(b["urls"]) if b else frozenset()
         urls_a = frozenset(a["urls"]) if a else frozenset()
         added_n = len(urls_a - urls_b)
         removed_n = len(urls_b - urls_a)
         d_feeds = feeds_a - feeds_b
         d_kw = kw_a - kw_b
-        if (
+        config_changed = bool(a or b) and not (
             d_feeds == 0
             and d_kw == 0
             and added_n == 0
             and removed_n == 0
             and b is not None
             and a is not None
-        ):
+        )
+        if not config_changed and s is None:
             continue
         changed = True
         lines.append(_section_heading(kind, title))
+        if config_changed:
+            lines.append(
+                f"- **Journal feeds:** {feeds_a} (Δ {_format_delta(d_feeds)} since last summary)\n"
+            )
+            lines.append(
+                f"- **Keywords** (research + excluded lines): {kw_a} "
+                f"(Δ {_format_delta(d_kw)} since last summary)\n"
+            )
+            if added_n or removed_n:
+                parts = []
+                if added_n:
+                    parts.append(f"**{added_n}** RSS URL(s) added")
+                if removed_n:
+                    parts.append(f"**{removed_n}** RSS URL(s) removed")
+                lines.append(f"- {'; '.join(parts)}\n")
+        if s is not None:
+            lines.extend(
+                format_stats_bullets(
+                    enqueued=int(s["enqueued"]),
+                    posted=int(s["posted"]),
+                    votes=s.get("votes"),
+                )
+            )
+        lines.append("\n")
+    if not changed:
+        return ""
+    return "\n".join(lines).strip()
+
+
+def _markdown_legacy_compact(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    stats_by_bucket: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    stats_by_bucket = stats_by_bucket or {}
+    urls_b = set(before.get("urls") or [])
+    urls_a = set(after.get("urls") or [])
+    ra_b, ea_b = before.get("research_areas") or [], before.get("excluded_areas") or []
+    ra_a, ea_a = after.get("research_areas") or [], after.get("excluded_areas") or []
+    kw_b = len(ra_b) + len(ea_b)
+    kw_a = len(ra_a) + len(ea_a)
+    feeds_b, feeds_a = len(urls_b), len(urls_a)
+    d_feeds = feeds_a - feeds_b
+    d_kw = kw_a - kw_b
+    added_n = len(urls_a - urls_b)
+    removed_n = len(urls_b - urls_a)
+    config_changed = not (d_feeds == 0 and d_kw == 0 and added_n == 0 and removed_n == 0)
+    fc = after.get("feed_category") or before.get("feed_category")
+    legacy_bid = f"c:{fc}" if fc else "g:legacy"
+    s = stats_by_bucket.get(legacy_bid)
+    if not fc:
+        # Also accept any single stats bucket for legacy configs.
+        if s is None and len(stats_by_bucket) == 1:
+            legacy_bid, s = next(iter(stats_by_bucket.items()))
+    if not config_changed and s is None:
+        return ""
+    if fc:
+        lines = [_section_heading("category", str(fc))]
+    elif s is not None:
+        lines = [_section_heading(str(s["kind"]), str(s["title"]))]
+    else:
+        lines = ["### Legacy config (single block)\n"]
+    if config_changed:
         lines.append(f"- **Journal feeds:** {feeds_a} (Δ {_format_delta(d_feeds)} since last summary)\n")
         lines.append(
             f"- **Keywords** (research + excluded lines): {kw_a} "
@@ -177,43 +261,14 @@ def _markdown_groups_compact(
             if removed_n:
                 parts.append(f"**{removed_n}** RSS URL(s) removed")
             lines.append(f"- {'; '.join(parts)}\n")
-        lines.append("\n")
-    if not changed:
-        return ""
-    return "\n".join(lines).strip()
-
-
-def _markdown_legacy_compact(before: dict[str, Any], after: dict[str, Any]) -> str:
-    urls_b = set(before.get("urls") or [])
-    urls_a = set(after.get("urls") or [])
-    ra_b, ea_b = before.get("research_areas") or [], before.get("excluded_areas") or []
-    ra_a, ea_a = after.get("research_areas") or [], after.get("excluded_areas") or []
-    kw_b = len(ra_b) + len(ea_b)
-    kw_a = len(ra_a) + len(ea_a)
-    feeds_b, feeds_a = len(urls_b), len(urls_a)
-    d_feeds = feeds_a - feeds_b
-    d_kw = kw_a - kw_b
-    added_n = len(urls_a - urls_b)
-    removed_n = len(urls_b - urls_a)
-    if d_feeds == 0 and d_kw == 0 and added_n == 0 and removed_n == 0:
-        return ""
-    fc = after.get("feed_category") or before.get("feed_category")
-    if fc:
-        lines = [_section_heading("category", str(fc))]
-    else:
-        lines = ["### Legacy config (single block)\n"]
-    lines.append(f"- **Journal feeds:** {feeds_a} (Δ {_format_delta(d_feeds)} since last summary)\n")
-    lines.append(
-        f"- **Keywords** (research + excluded lines): {kw_a} "
-        f"(Δ {_format_delta(d_kw)} since last summary)\n"
-    )
-    if added_n or removed_n:
-        parts = []
-        if added_n:
-            parts.append(f"**{added_n}** RSS URL(s) added")
-        if removed_n:
-            parts.append(f"**{removed_n}** RSS URL(s) removed")
-        lines.append(f"- {'; '.join(parts)}\n")
+    if s is not None:
+        lines.extend(
+            format_stats_bullets(
+                enqueued=int(s["enqueued"]),
+                posted=int(s["posted"]),
+                votes=s.get("votes"),
+            )
+        )
     return "".join(lines).strip()
 
 
@@ -222,25 +277,51 @@ def markdown_config_diff(
     after: dict[str, Any],
     *,
     allowed_bucket_ids: frozenset[str] | None = None,
+    stats_by_bucket: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Human-readable markdown of differences between two normalized snapshots.
 
     For ``[[groups]]`` snapshots, ``allowed_bucket_ids`` limits sections to buckets
     (category or per-group) that use the target Zulip stream in ``zulip_sources``.
+    Optional ``stats_by_bucket`` merges weekly feedback queued/posted/vote lines.
     """
     if before is None:
+        if stats_by_bucket:
+            from zulip_feedback_weekly_stats import markdown_stats_only
+
+            filtered = {
+                k: v
+                for k, v in stats_by_bucket.items()
+                if allowed_bucket_ids is None or k in allowed_bucket_ids
+            }
+            return markdown_stats_only(filtered)
         return ""
     if before.get("mode") != after.get("mode"):
-        return (
+        body = (
             "- **Config layout changed** (switched between legacy top-level keys and `[[groups]]`). "
             "Review `config.toml` manually.\n"
         )
+        if stats_by_bucket:
+            from zulip_feedback_weekly_stats import markdown_stats_only
+
+            filtered = {
+                k: v
+                for k, v in stats_by_bucket.items()
+                if allowed_bucket_ids is None or k in allowed_bucket_ids
+            }
+            extra = markdown_stats_only(filtered)
+            if extra:
+                body = body + "\n" + extra
+        return body
 
     if after["mode"] == "legacy":
-        return _markdown_legacy_compact(before, after)
+        return _markdown_legacy_compact(before, after, stats_by_bucket=stats_by_bucket)
 
     return _markdown_groups_compact(
-        before, after, allowed_bucket_ids=allowed_bucket_ids
+        before,
+        after,
+        allowed_bucket_ids=allowed_bucket_ids,
+        stats_by_bucket=stats_by_bucket,
     )
 
 
@@ -350,6 +431,63 @@ def _allowed_bucket_ids_for_realm_stream(
     return frozenset(ids)
 
 
+def _stats_by_bucket_for_stream(
+    *,
+    config_path: Path,
+    zulip_cfg: dict,
+    zulip_realms: dict[str, dict[str, str]],
+    realm: str,
+    stream: str,
+    allowed_bucket_ids: frozenset[str] | None,
+    period_start_unix: float,
+) -> dict[str, dict[str, Any]]:
+    """Load period counters + votes for one stream; empty dict on failure."""
+    try:
+        stats_doc = load_stats(feedback_weekly_stats_path(config_path, zulip_cfg))
+        counters = counters_for_stream(
+            stats_doc,
+            realm=realm,
+            stream=stream,
+            allowed_bucket_ids=allowed_bucket_ids,
+        )
+        votes: dict[str, tuple[int, int]] = {}
+        try:
+            client = _client_for_realm(zulip_realms, realm)
+            lookback_hours = max(
+                24, int((time.time() - float(period_start_unix or time.time())) / 3600) + 24
+            )
+            msgs = fetch_messages_narrow(
+                client,
+                stream,
+                FEEDBACK_RANKING_TOPIC,
+                lookback_hours,
+                500,
+            )
+            votes = aggregate_votes_for_stream(
+                msgs,
+                list(stats_doc.get("posted_events") or []),
+                realm=realm,
+                stream=stream,
+                period_start_unix=float(
+                    stats_doc.get("period_start_unix") or period_start_unix or 0.0
+                ),
+            )
+            if allowed_bucket_ids is not None:
+                votes = {k: v for k, v in votes.items() if k in allowed_bucket_ids}
+        except Exception:
+            logger.exception(
+                "Journal weekly summary: vote fetch failed realm=%s stream=%s",
+                realm,
+                stream,
+            )
+        return collect_stats_by_bucket(counters, votes)
+    except Exception:
+        logger.exception(
+            "Journal weekly summary: stats load failed realm=%s stream=%s", realm, stream
+        )
+        return {}
+
+
 def maybe_post_weekly_journal_config_summary(
     *,
     config_path: Path,
@@ -358,7 +496,7 @@ def maybe_post_weekly_journal_config_summary(
     zulip_cfg: dict,
     dryrun: bool,
 ) -> None:
-    """If due (~weekly) and the config changed since the saved baseline, post a Zulip summary."""
+    """If due (~weekly), post config and/or feedback-stats digest under journal suggestions."""
     if zulip_cfg.get("journal_weekly_summary") is False:
         return
     if not zulip_realms:
@@ -382,6 +520,8 @@ def maybe_post_weekly_journal_config_summary(
         state["snap"] = current
         state["last_summary_post_unix"] = time.time()
         _save_state(state_path, state)
+        # Ensure stats period starts now so the first week has a defined window.
+        reset_period_after_summary(config_path, zulip_cfg, dryrun=False)
         logger.info(
             "Journal weekly summary: saved initial config snapshot for %s (no post yet)",
             config_path.name,
@@ -413,19 +553,11 @@ def maybe_post_weekly_journal_config_summary(
     if now - baseline_last < SUMMARY_INTERVAL_SEC:
         return
 
-    body_full = markdown_config_diff(snap, current)
-    if not body_full:
-        if dryrun:
-            return
-        state["snap"] = current
-        state["last_summary_post_unix"] = now
-        _save_state(state_path, state)
-        logger.info(
-            "Journal weekly summary: interval elapsed for %s but no config diff; "
-            "refreshed snapshot and timer",
-            config_path.name,
-        )
-        return
+    try:
+        stats_doc = load_stats(feedback_weekly_stats_path(config_path, zulip_cfg))
+        period_start = float(stats_doc.get("period_start_unix") or baseline_last or now)
+    except Exception:
+        period_start = baseline_last or now
 
     from datetime import datetime, timezone
 
@@ -433,27 +565,39 @@ def maybe_post_weekly_journal_config_summary(
     since_dt = datetime.fromtimestamp(since_s, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     header = (
         f"## Weekly `config.toml` summary — `{config_path.name}`\n\n"
-        f"_Changes since about **{since_dt}** (previous summary post or baseline)._\n\n"
+        f"_Config and feedback activity since about **{since_dt}** "
+        f"(previous summary post or baseline)._\n\n"
     )
 
     streams_with_relevant_updates = 0
+    any_content = False
     for realm, stream in pairs:
         allowed = _allowed_bucket_ids_for_realm_stream(cfg, realm, stream)
-        if allowed is None:
-            stream_body = body_full
-        else:
-            stream_body = markdown_config_diff(
-                snap, current, allowed_bucket_ids=allowed
-            )
+        stats_by_bucket = _stats_by_bucket_for_stream(
+            config_path=config_path,
+            zulip_cfg=zulip_cfg,
+            zulip_realms=zulip_realms,
+            realm=realm,
+            stream=stream,
+            allowed_bucket_ids=allowed,
+            period_start_unix=period_start,
+        )
+        stream_body = markdown_config_diff(
+            snap,
+            current,
+            allowed_bucket_ids=allowed,
+            stats_by_bucket=stats_by_bucket or None,
+        )
         if not stream_body:
             if dryrun:
                 logger.info(
                     "[dry run] journal weekly summary: skip realm=%s stream=%s "
-                    "(no diff for this stream's categories/groups)",
+                    "(no config diff or feedback stats for this stream)",
                     realm,
                     stream,
                 )
             continue
+        any_content = True
         streams_with_relevant_updates += 1
         message = header + stream_body
         if len(message) > ZULIP_MESSAGE_MAX_CHARS:
@@ -503,9 +647,22 @@ def maybe_post_weekly_journal_config_summary(
             len(pairs),
         )
         return
+
+    if not any_content:
+        state["snap"] = current
+        state["last_summary_post_unix"] = now
+        _save_state(state_path, state)
+        logger.info(
+            "Journal weekly summary: interval elapsed for %s but no config diff or "
+            "feedback stats; refreshed snapshot and timer",
+            config_path.name,
+        )
+        return
+
     state["snap"] = current
     state["last_summary_post_unix"] = time.time()
     _save_state(state_path, state)
+    reset_period_after_summary(config_path, zulip_cfg, dryrun=False)
     logger.info(
         "Posted journal weekly summary for %s (%d stream destination(s) with relevant updates, "
         "%d configured)",

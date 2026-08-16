@@ -135,6 +135,32 @@ class TestEnqueueDedupe(unittest.TestCase):
         qpath = feedback_ranking_queue_path(self.cfg_path, {})
         self.assertFalse(qpath.exists())
 
+    def test_persists_bucket_and_records_stats(self) -> None:
+        zulip_sources = [{"realm": "R1", "stream": "general"}]
+        msgs_by_pair: dict = {("r1", "general"): []}
+        titles = [("Paper", "https://arxiv.org/abs/2401.00009", None)]
+        n = enqueue_feedback_ranking_for_group(
+            self.cfg_path,
+            {},
+            zulip_sources,
+            msgs_by_pair,
+            titles,
+            group_name="g1",
+            dryrun=False,
+            feed_category="cm",
+        )
+        self.assertEqual(n, 1)
+        doc = self._read_queue()
+        pending = doc["queues"][0]["pending"][0]
+        self.assertEqual(pending["bucket_id"], "c:cm")
+        self.assertEqual(pending["bucket_title"], "cm")
+        self.assertEqual(pending["kind"], "category")
+        from zulip_feedback_weekly_stats import feedback_weekly_stats_path, load_stats
+
+        stats = load_stats(feedback_weekly_stats_path(self.cfg_path, {}))
+        self.assertEqual(stats["counters"][0]["enqueued"], 1)
+        self.assertEqual(stats["counters"][0]["bucket_id"], "c:cm")
+
 
 class TestDispatchQueue(unittest.TestCase):
     def setUp(self) -> None:

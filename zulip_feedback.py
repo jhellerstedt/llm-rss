@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from api_usage import record_zulip_api
@@ -31,6 +32,7 @@ class GroupFeedbackCandidates:
     title_link_scores: list[TitleLinkScore]
     single_author_impact_penalty: int = 1
     max_posts: int = MAX_FEEDBACK_RANKING_POSTS_PER_GROUP
+    feed_category: str | None = None
 _LINK_LINE = re.compile(r"(?im)^\s*Link:\s*(.+?)\s*$")
 
 # Zulip canonical reaction names are "+1" / "-1"; aliases include thumbs_up / thumbs_down.
@@ -494,6 +496,10 @@ def post_feedback_ranking_for_new_items(
     titles_and_links: list[tuple[str, str, PaperEnrichment | None]],
     dryrun: bool,
     max_sends_per_group: int = MAX_FEEDBACK_RANKING_POSTS_PER_GROUP,
+    config_path: Path | None = None,
+    zulip_cfg: dict[str, Any] | None = None,
+    group_name: str = "",
+    feed_category: str | None = None,
 ) -> None:
     """Post messages for ``titles_and_links`` where the link is not already in that topic.
 
@@ -502,6 +508,9 @@ def post_feedback_ranking_for_new_items(
     """
     if not titles_and_links or max_sends_per_group <= 0:
         return
+    from zulip_feedback_weekly_stats import record_posted, resolve_bucket
+
+    bid, btitle, bkind = resolve_bucket(group_name or "unnamed", feed_category)
     sends_left = max_sends_per_group
     for realm, stream in unique_realm_stream_pairs(zulip_sources):
         if sends_left <= 0:
@@ -554,6 +563,18 @@ def post_feedback_ranking_for_new_items(
                 record_zulip_api(1)
                 posted.add(key)
                 sends_left -= 1
+                if config_path is not None:
+                    record_posted(
+                        Path(config_path),
+                        zulip_cfg or {},
+                        realm=realm,
+                        stream=stream,
+                        bucket_id=bid,
+                        title=btitle,
+                        kind=bkind,
+                        link=link,
+                        dryrun=False,
+                    )
             except Exception:
                 logger.exception(
                     "Zulip post feedback failed realm=%s stream=%s", realm, stream
