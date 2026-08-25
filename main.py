@@ -19,7 +19,16 @@ from fastgpt_reply import (
     parse_reply_from_openrouter_output,
 )
 from kagi_client import KagiClient, DEFAULT_FASTGPT_URL, DEFAULT_SUMMARIZE_URL
-from openrouter_client import OpenRouterClient, get_openrouter_usage, reset_openrouter_usage
+from openrouter_client import (
+    DEFAULT_MAX_TOKENS,
+    OpenRouterClient,
+    get_openrouter_usage,
+    reset_openrouter_usage,
+)
+from openrouter_credits import (
+    OpenRouterInsufficientCredits,
+    ensure_openrouter_credits_for_run,
+)
 from openalex_enrich import (
     PaperEnrichment,
     apply_kagi_metadata_backfill,
@@ -290,6 +299,7 @@ def make_openrouter_client(openrouter_table: dict | None) -> OpenRouterClient | 
         timeout=float(openrouter_table.get("timeout", 60)),
         site_url=str(openrouter_table.get("site_url", "")),
         site_name=str(openrouter_table.get("site_name", "llm-rss")),
+        max_tokens=int(openrouter_table.get("max_tokens", DEFAULT_MAX_TOKENS)),
     )
 
 
@@ -783,6 +793,24 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 route_to_openrouter or "(none)",
             )
 
+        groups = expand_groups(cfg)
+        kagi_cfg = cfg.get("kagi") or {}
+        pf_cap = int(kagi_cfg.get("prefilter_max_candidates", 20))
+        batch_sz = int(kagi_cfg.get("scoring_batch_size", 5))
+
+        if openrouter is not None and route_to_openrouter:
+            try:
+                ensure_openrouter_credits_for_run(
+                    openrouter,
+                    groups,
+                    route_to_openrouter,
+                    openrouter_table=openrouter_table or {},
+                    kagi_table=kagi_table,
+                )
+            except OpenRouterInsufficientCredits as e:
+                logger.error("%s", e)
+                return
+
         zulip_cfg = dict(cfg.get("zulip") or {})
         realms_path_cfg = zulip_cfg.get("realms_config_file")
         if realms_path_cfg:
@@ -821,11 +849,6 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                         author_whitelist.save(wl_path)
                 except Exception:
                     logger.exception("[author-whitelist] bot poll failed")
-
-        groups = expand_groups(cfg)
-        kagi_cfg = cfg.get("kagi") or {}
-        pf_cap = int(kagi_cfg.get("prefilter_max_candidates", 20))
-        batch_sz = int(kagi_cfg.get("scoring_batch_size", 5))
 
         # Per-group index -> untracked venues from that group's Zulip pulls (for config.toml updates).
         suggestions_by_group_idx: dict[int, dict[str, dict[str, VenueBucket]]] = {}

@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "~anthropic/claude-haiku-latest"
+DEFAULT_MAX_TOKENS = 4096
 
 _SCORE_SYSTEM_PROMPT = (
     "You are an academic paper evaluator curating an RSS feed. "
@@ -70,6 +71,7 @@ class OpenRouterClient:
         site_url: str = "",
         site_name: str = "llm-rss",
         api_url: str = DEFAULT_OPENROUTER_URL,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
     ):
         self.api_key = (api_key or os.environ.get("OPENROUTER_API_KEY", "")).strip()
         self.model = (model or os.environ.get("OPENROUTER_MODEL") or DEFAULT_MODEL).strip()
@@ -78,6 +80,7 @@ class OpenRouterClient:
         self.site_url = site_url
         self.site_name = site_name
         self.api_url = api_url
+        self.max_tokens = max(1, int(max_tokens))
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -93,6 +96,28 @@ class OpenRouterClient:
         if self.site_name:
             headers["X-Title"] = self.site_name
         return headers
+
+    def _api_base(self) -> str:
+        url = self.api_url.rstrip("/")
+        suffix = "/chat/completions"
+        if url.endswith(suffix):
+            return url[: -len(suffix)]
+        return url
+
+    def get_json(self, path: str) -> dict[str, Any]:
+        """GET a JSON object from the OpenRouter REST API (e.g. ``/key``)."""
+        rel = path if path.startswith("/") else f"/{path}"
+        r = requests.get(
+            f"{self._api_base()}{rel}",
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        record_openrouter_http(1)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            raise ValueError(f"OpenRouter GET {rel} returned non-object JSON")
+        return data
 
     def _post_json_with_retries(
         self,
@@ -183,6 +208,7 @@ class OpenRouterClient:
         payload: dict[str, Any] = {
             "model": model or self.model,
             "messages": messages,
+            "max_tokens": self.max_tokens,
         }
         result = self._post_json_with_retries(payload)
         choices = result.get("choices")
