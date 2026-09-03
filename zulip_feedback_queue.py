@@ -16,6 +16,7 @@ from zulip_feedback import (
     FEEDBACK_RANKING_TOPIC,
     bot_identity_for_realm,
     count_thumbs_reactions,
+    feedback_link_keys,
     feedback_ranking_ready_for_next_post,
     format_feedback_post_body,
     latest_feedback_ranking_message,
@@ -55,6 +56,7 @@ def paper_enrichment_to_json(en: PaperEnrichment | None) -> dict[str, Any] | Non
         "last_affiliation": en.last_affiliation,
         "top_author_affiliation": en.top_author_affiliation,
         "author_count": en.author_count,
+        "arxiv_url": en.arxiv_url,
     }
 
 
@@ -82,6 +84,12 @@ def paper_enrichment_from_json(data: dict[str, Any] | None) -> PaperEnrichment |
                 top_h = int(raw_h)
             except (TypeError, ValueError):
                 top_h = None
+    raw_arxiv = data.get("arxiv_url")
+    arxiv_url: str | None
+    if isinstance(raw_arxiv, str) and raw_arxiv.strip():
+        arxiv_url = raw_arxiv.strip()
+    else:
+        arxiv_url = None
     return PaperEnrichment(
         top_author_name=str(data.get("top_author_name", "")),
         first_affiliation=str(data.get("first_affiliation", "")),
@@ -89,6 +97,7 @@ def paper_enrichment_from_json(data: dict[str, Any] | None) -> PaperEnrichment |
         top_h_index=top_h,
         top_author_affiliation=str(data.get("top_author_affiliation", "Unknown")),
         author_count=author_count,
+        arxiv_url=arxiv_url,
     )
 
 
@@ -248,10 +257,21 @@ def enqueue_feedback_ranking_for_group(
             bot_email, bot_name = bot_identity_for_realm(realms, realm)
             posted = links_announced_in_messages(msgs, bot_email, bot_name)
             key_list = by_pair.setdefault((realm, stream), [])
-            pending_keys = {normalize_link(str(x["link"])) for x in key_list}
+            pending_keys: set[str] = set()
+            for x in key_list:
+                pending_keys.update(
+                    feedback_link_keys(
+                        str(x.get("link", "")),
+                        paper_enrichment_from_json(
+                            x["enrichment"]
+                            if isinstance(x.get("enrichment"), dict)
+                            else None
+                        ),
+                    )
+                )
             for title, link, enrichment in titles_and_links:
-                k = normalize_link(link)
-                if k in posted or k in pending_keys:
+                aliases = feedback_link_keys(link, enrichment)
+                if aliases & posted or aliases & pending_keys:
                     continue
                 key_list.append(
                     {
@@ -264,7 +284,7 @@ def enqueue_feedback_ranking_for_group(
                         "group_name": group_name,
                     }
                 )
-                pending_keys.add(k)
+                pending_keys.update(aliases)
                 added += 1
                 if not dryrun:
                     record_enqueued(
@@ -281,7 +301,7 @@ def enqueue_feedback_ranking_for_group(
                     "Zulip feedback ranking queue: +1 realm=%s stream=%s link=%s group=%s dryrun=%s",
                     realm,
                     stream,
-                    k[:80],
+                    normalize_link(link)[:80],
                     group_name,
                     dryrun,
                 )
@@ -372,8 +392,9 @@ def dispatch_feedback_ranking_queue_once(
                 continue
             bot_email, bot_name = bot_identity_for_realm(zulip_realms, realm)
             posted = links_announced_in_messages(msgs, bot_email, bot_name)
+            aliases = feedback_link_keys(link, en)
             k = normalize_link(link)
-            if k in posted:
+            if aliases & posted:
                 by_pair[(realm, stream)] = pending[1:]
                 logger.info(
                     "Feedback queue: dropped stale head (already in topic) realm=%s stream=%s",

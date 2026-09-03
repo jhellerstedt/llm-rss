@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from api_usage import record_zulip_api
-from openalex_enrich import PaperEnrichment, format_enrichment_for_feedback_zulip
+from openalex_enrich import PaperEnrichment, format_enrichment_for_feedback_zulip, preferred_public_link
 from rss_merge import normalize_link
 from zulip_context import fetch_messages_narrow, strip_zulip_html, _client_for_realm
 
@@ -381,11 +381,23 @@ def format_feedback_post_body(
     link: str,
     enrichment: PaperEnrichment | None = None,
 ) -> str:
-    base = f"{title.strip()}\n\nLink: {link.strip()}"
+    public = preferred_public_link(link, enrichment)
+    base = f"{title.strip()}\n\nLink: {public.strip()}"
     extra = format_enrichment_for_feedback_zulip(enrichment)
     if extra:
         return f"{base}\n\n{extra}"
     return base
+
+
+def feedback_link_keys(
+    link: str, enrichment: PaperEnrichment | None = None
+) -> set[str]:
+    """Normalized URLs that identify the same paper for Zulip dedup (journal + arXiv)."""
+    keys = {normalize_link(link)}
+    public = preferred_public_link(link, enrichment)
+    if public:
+        keys.add(normalize_link(public))
+    return keys
 
 
 def _impact_for_feedback_ranking(
@@ -529,8 +541,8 @@ def post_feedback_ranking_for_new_items(
         for title, link, enrichment in titles_and_links:
             if sends_left <= 0:
                 return
-            key = normalize_link(link)
-            if key in posted:
+            aliases = feedback_link_keys(link, enrichment)
+            if aliases & posted:
                 continue
             body = format_feedback_post_body(title, link, enrichment)
             if dryrun:
@@ -538,9 +550,9 @@ def post_feedback_ranking_for_new_items(
                     "[dry run] would post feedback ranking realm=%s stream=%s link=%s",
                     realm,
                     stream,
-                    key[:80],
+                    normalize_link(link)[:80],
                 )
-                posted.add(key)
+                posted.update(aliases)
                 sends_left -= 1
                 continue
             try:
@@ -561,7 +573,7 @@ def post_feedback_ranking_for_new_items(
                     )
                     continue
                 record_zulip_api(1)
-                posted.add(key)
+                posted.update(aliases)
                 sends_left -= 1
                 if config_path is not None:
                     record_posted(

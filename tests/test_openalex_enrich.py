@@ -9,6 +9,7 @@ from openalex_enrich import (
     PaperEnrichment,
     _KagiBatchPaperItem,
     apply_kagi_metadata_backfill,
+    arxiv_url_from_work,
     batch_enrich_articles,
     build_enrichment_for_work,
     extract_arxiv_id,
@@ -16,8 +17,10 @@ from openalex_enrich import (
     format_enrichment_for_feed,
     merge_paper_enrichment,
     paper_enrichment_incomplete,
+    preferred_public_link,
     direct_openalex_work_urls,
     fetch_author_metric,
+    search_arxiv_by_title,
 )
 
 
@@ -57,6 +60,20 @@ class TestOpenAlexHelpers(unittest.TestCase):
             "10.1038/s41586-020-2649-2",
         )
 
+    def test_extract_doi_from_nature_article_url(self) -> None:
+        self.assertEqual(
+            extract_doi_from_link(
+                "https://www.nature.com/articles/s41586-026-10638-w"
+            ),
+            "10.1038/s41586-026-10638-w",
+        )
+
+    def test_direct_work_urls_include_nature_doi(self) -> None:
+        urls = direct_openalex_work_urls(
+            "https://www.nature.com/articles/s41586-026-10638-w"
+        )
+        self.assertTrue(any("10.1038%2Fs41586-026-10638-w" in u for u in urls))
+
 
 class TestBuildEnrichment(unittest.TestCase):
     def test_top_h_and_affiliations(self) -> None:
@@ -95,6 +112,97 @@ class TestBuildEnrichment(unittest.TestCase):
         self.assertEqual(en.first_affiliation, "MIT")
         self.assertEqual(en.last_affiliation, "Stanford University")
         self.assertEqual(en.author_count, 3)
+
+    def test_skips_polluted_author_profile_for_top_h(self) -> None:
+        """Merged OpenAlex identities (dozens of last-known institutions) must not win."""
+        work = {
+            "authorships": [
+                {
+                    "author_position": "first",
+                    "author": {"id": "https://openalex.org/A1"},
+                    "institutions": [{"display_name": "Aalto University"}],
+                },
+                {
+                    "author_position": "middle",
+                    "author": {"id": "https://openalex.org/A2"},
+                    "institutions": [
+                        {"display_name": "National Center for Nanoscience and Technology"},
+                        {"display_name": "University of Hong Kong"},
+                    ],
+                },
+            ],
+        }
+        polluted_insts = tuple(f"Inst {i}" for i in range(12)) + (
+            "National Center for Nanoscience and Technology",
+            "University of Hong Kong",
+        )
+        metrics = {
+            "https://openalex.org/A1": AuthorMetric(
+                "Zhipei Sun", 67, ("Aalto University",)
+            ),
+            "https://openalex.org/A2": AuthorMetric(
+                "Shuang Zhang", 104, polluted_insts
+            ),
+        }
+        en = build_enrichment_for_work(work, metrics)
+        assert en is not None
+        self.assertEqual(en.top_author_name, "Zhipei Sun")
+        self.assertEqual(en.top_h_index, 67)
+        self.assertEqual(en.top_author_affiliation, "Aalto University")
+
+    def test_skips_author_whose_profile_institutions_do_not_match_paper(self) -> None:
+        work = {
+            "authorships": [
+                {
+                    "author_position": "first",
+                    "author": {"id": "https://openalex.org/A1"},
+                    "institutions": [{"display_name": "Soochow University"}],
+                },
+                {
+                    "author_position": "last",
+                    "author": {"id": "https://openalex.org/A2"},
+                    "institutions": [{"display_name": "Aalto University"}],
+                },
+            ],
+        }
+        metrics = {
+            "https://openalex.org/A1": AuthorMetric(
+                "Feng Ding", 93, ("Jiangxi University of Water Resources",)
+            ),
+            "https://openalex.org/A2": AuthorMetric(
+                "Zhipei Sun", 67, ("Aalto University",)
+            ),
+        }
+        en = build_enrichment_for_work(work, metrics)
+        assert en is not None
+        self.assertEqual(en.top_author_name, "Zhipei Sun")
+        self.assertEqual(en.top_h_index, 67)
+        self.assertEqual(en.top_author_affiliation, "Aalto University")
+
+    def test_top_affiliation_prefers_overlapping_institution(self) -> None:
+        work = {
+            "authorships": [
+                {
+                    "author_position": "first",
+                    "author": {"id": "https://openalex.org/A1"},
+                    "institutions": [
+                        {"display_name": "National Center for Nanoscience and Technology"},
+                        {"display_name": "University of Hong Kong"},
+                    ],
+                },
+            ],
+        }
+        metrics = {
+            "https://openalex.org/A1": AuthorMetric(
+                "Shuang Zhang",
+                80,
+                ("University of Hong Kong", "University of Birmingham"),
+            ),
+        }
+        en = build_enrichment_for_work(work, metrics)
+        assert en is not None
+        self.assertEqual(en.top_author_name, "Shuang Zhang")
+        self.assertEqual(en.top_author_affiliation, "University of Hong Kong")
 
     def test_author_count_one(self) -> None:
         work = {
@@ -433,6 +541,94 @@ class TestOpenAlexHttp(unittest.TestCase):
             loaded = _load_author_metric_cache(path)
             self.assertEqual(loaded["A1"].display_name, "Ada")
             self.assertEqual(loaded["A1"].h_index, 12)
+            self.assertEqual(loaded["A1"].institutions, ())
+
+    def test_author_cache_round_trip_institutions(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from openalex_enrich import (
+            AuthorMetric,
+            _load_author_metric_cache,
+            _save_author_metric_cache,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            _save_author_metric_cache(
+                path,
+                {"A1": AuthorMetric("Ada", 12, ("MIT", "Caltech"))},
+            )
+            loaded = _load_author_metric_cache(path)
+            self.assertEqual(loaded["A1"].institutions, ("MIT", "Caltech"))
+
+
+class TestArxivLookup(unittest.TestCase):
+    def test_arxiv_url_from_work_location(self) -> None:
+        work = {
+            "locations": [
+                {
+                    "landing_page_url": "https://arxiv.org/abs/2401.12345",
+                    "is_oa": True,
+                }
+            ]
+        }
+        self.assertEqual(
+            arxiv_url_from_work(work), "https://arxiv.org/abs/2401.12345"
+        )
+
+    def test_arxiv_url_from_work_oa_url(self) -> None:
+        work = {
+            "open_access": {
+                "oa_url": "https://arxiv.org/pdf/2401.99999.pdf",
+            }
+        }
+        self.assertEqual(
+            arxiv_url_from_work(work), "https://arxiv.org/abs/2401.99999"
+        )
+
+    def test_preferred_public_link_prefers_arxiv(self) -> None:
+        en = PaperEnrichment(
+            top_author_name="A",
+            first_affiliation="U",
+            last_affiliation="U",
+            arxiv_url="https://arxiv.org/abs/2401.00001",
+        )
+        self.assertEqual(
+            preferred_public_link(
+                "https://www.nature.com/articles/s41586-026-10638-w", en
+            ),
+            "https://arxiv.org/abs/2401.00001",
+        )
+
+    def test_preferred_public_link_keeps_original_without_arxiv(self) -> None:
+        journal = "https://www.nature.com/articles/s41586-026-10638-w"
+        self.assertEqual(preferred_public_link(journal, None), journal)
+
+    @patch("openalex_enrich.requests.get")
+    def test_search_arxiv_by_title_returns_abs_url(
+        self, mock_get: unittest.mock.MagicMock
+    ) -> None:
+        atom = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2401.55555v1</id>
+    <title>Probing picometre-scale interlayer deformations via hyperbolic polaritons</title>
+  </entry>
+</feed>
+"""
+        resp = unittest.mock.MagicMock()
+        resp.status_code = 200
+        resp.text = atom
+        resp.content = atom.encode()
+        resp.raise_for_status = lambda: None
+        mock_get.return_value = resp
+        self.assertEqual(
+            search_arxiv_by_title(
+                "Probing picometre-scale interlayer deformations via hyperbolic polaritons"
+            ),
+            "https://arxiv.org/abs/2401.55555",
+        )
 
 
 if __name__ == "__main__":

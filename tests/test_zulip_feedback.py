@@ -65,6 +65,20 @@ class TestZulipFeedbackParsing(unittest.TestCase):
         self.assertIn("h-index 42", b)
         self.assertIn("Analytical Engines Ltd", b)
 
+    def test_format_feedback_post_body_prefers_arxiv_link(self) -> None:
+        en = PaperEnrichment(
+            top_author_name="Ada Lovelace",
+            first_affiliation="Unknown",
+            last_affiliation="Unknown",
+            top_h_index=42,
+            arxiv_url="https://arxiv.org/abs/2401.00001",
+        )
+        b = format_feedback_post_body(
+            "T", "https://www.nature.com/articles/s41586-026-10638-w", en
+        )
+        self.assertIn("Link: https://arxiv.org/abs/2401.00001", b)
+        self.assertNotIn("nature.com", b)
+
 
 class TestZulipFeedbackReactions(unittest.TestCase):
     def test_count_thumbs(self) -> None:

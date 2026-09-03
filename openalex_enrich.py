@@ -7,8 +7,9 @@ import logging
 import re
 import threading
 import time
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
@@ -32,7 +33,10 @@ _MAX_PLAUSIBLE_AUTHOR_H_INDEX = 400
 
 OPENALEX_BASE = "https://api.openalex.org"
 _HTTP_HEADERS = {"User-Agent": "llm-rss/openalex-enrich"}
-_AUTHOR_CACHE_VERSION = 1
+_AUTHOR_CACHE_VERSION = 2
+# OpenAlex often merges distinct people who share a name; those profiles list
+# many last-known institutions. h-index from such records is not usable.
+_MAX_TRUSTED_LAST_KNOWN_INSTITUTIONS = 5
 _AUTHOR_CACHE_TTL_SECONDS = 7 * 86400
 _DEFAULT_REQUESTS_PER_SECOND = 8.0
 _DEFAULT_MAX_AUTHOR_WORKERS = 2
@@ -71,6 +75,12 @@ _ARXIV_DATACITE = re.compile(
     re.IGNORECASE,
 )
 _DOI = re.compile(r"(10\.\d{4,9}/[^\s?#%]+)", re.IGNORECASE)
+# Nature article URLs omit the 10.1038/ prefix (e.g. /articles/s41586-026-10638-w).
+_NATURE_ARTICLE = re.compile(
+    r"nature\.com/(?:articles|news)/([A-Za-z0-9._-]+)",
+    re.IGNORECASE,
+)
+_ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 
 @dataclass(frozen=True)
@@ -78,6 +88,8 @@ class AuthorMetric:
     display_name: str
     #: Bibliometric h-index when known; ``None`` when missing or not credible.
     h_index: int | None
+    #: OpenAlex ``last_known_institutions`` display names (empty if unknown).
+    institutions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -90,6 +102,8 @@ class PaperEnrichment:
     top_author_affiliation: str = "Unknown"
     #: From OpenAlex ``len(authorships)`` when a work is resolved; ``None`` if unknown.
     author_count: int | None = None
+    #: arXiv abs URL when a preprint is found; prefer this over paywalled journal links.
+    arxiv_url: str | None = None
 
     def format_block(self) -> str:
         h_label = _h_index_display(self.top_h_index)
@@ -112,6 +126,67 @@ class PaperEnrichment:
 def _is_unknown(s: str) -> bool:
     t = str(s).strip()
     return not t or t.lower() == "unknown"
+
+
+def _norm_institution(s: str) -> str:
+    t = str(s).strip().lower()
+    t = re.sub(r"^the\s+", "", t)
+    t = re.sub(r"[^\w\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _institutions_overlap(paper: list[str], author: tuple[str, ...]) -> bool:
+    """True when we cannot check, or at least one institution name agrees."""
+    pn = [_norm_institution(x) for x in paper if str(x).strip()]
+    an = [_norm_institution(x) for x in author if str(x).strip()]
+    if not pn or not an:
+        return True
+    for p in pn:
+        for a in an:
+            if p == a:
+                return True
+            if len(p) >= 8 and len(a) >= 8 and (p in a or a in p):
+                return True
+    return False
+
+
+def _author_metric_trusted(m: AuthorMetric, paper_insts: list[str]) -> bool:
+    if len(m.institutions) > _MAX_TRUSTED_LAST_KNOWN_INSTITUTIONS:
+        return False
+    return _institutions_overlap(paper_insts, m.institutions)
+
+
+def _paper_institutions(a: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for inst in a.get("institutions") or []:
+        if not isinstance(inst, dict):
+            continue
+        dn = str(inst.get("display_name") or "").strip()
+        key = _norm_institution(dn)
+        if dn and key not in seen:
+            seen.add(key)
+            out.append(dn)
+    for aff in a.get("affiliations") or []:
+        if not isinstance(aff, dict):
+            continue
+        raw = str(aff.get("raw_affiliation_string") or "").strip()
+        key = _norm_institution(raw)
+        if raw and key not in seen:
+            seen.add(key)
+            out.append(raw)
+    return out
+
+
+def _affiliation_matching_author(
+    authorship: dict[str, Any], metric: AuthorMetric
+) -> str:
+    paper_insts = _paper_institutions(authorship)
+    for inst in paper_insts:
+        if _institutions_overlap([inst], metric.institutions):
+            return inst
+    return affiliation_for_authorship(authorship)
 
 
 def _norm_person_name(name: str) -> str:
@@ -225,6 +300,7 @@ def merge_paper_enrichment(
         top_h_index=top_h,
         top_author_affiliation=top_aff,
         author_count=ac,
+        arxiv_url=openalex.arxiv_url or kagi.arxiv_url,
     )
 
 
@@ -249,6 +325,13 @@ def format_enrichment_for_feedback_zulip(en: PaperEnrichment | None) -> str:
     if not _is_unknown(en.top_author_affiliation):
         lines.append(f"That author's affiliation: {en.top_author_affiliation}")
     return "\n".join(lines).strip()
+
+
+def preferred_public_link(original: str, en: PaperEnrichment | None) -> str:
+    """Prefer an arXiv abs URL over a paywalled journal landing page."""
+    if en is not None and en.arxiv_url:
+        return str(en.arxiv_url).strip() or original
+    return original
 
 
 class _KagiMetadataJson(BaseModel):
@@ -447,9 +530,14 @@ def _titles_match(feed_title: str, work_title: str) -> bool:
 def extract_doi_from_link(link: str) -> str | None:
     raw = unquote(link)
     m = _DOI.search(raw)
-    if not m:
-        return None
-    return m.group(1).rstrip(".,;)")
+    if m:
+        return m.group(1).rstrip(".,;)")
+    nm = _NATURE_ARTICLE.search(raw)
+    if nm:
+        article_id = nm.group(1).rstrip(".,;)")
+        if article_id:
+            return f"10.1038/{article_id}"
+    return None
 
 
 def extract_arxiv_id(link: str) -> str | None:
@@ -458,6 +546,115 @@ def extract_arxiv_id(link: str) -> str | None:
         return m.group("id")
     m = _ARXIV_DATACITE.search(link)
     return m.group("id") if m else None
+
+
+def _arxiv_abs_url(arxiv_id: str) -> str:
+    return f"https://arxiv.org/abs/{arxiv_id}"
+
+
+def arxiv_url_from_work(work: dict[str, Any] | None) -> str | None:
+    """Return an arXiv abs URL from OpenAlex locations / ids, if present."""
+    if not work:
+        return None
+    candidates: list[str] = []
+    ids = work.get("ids")
+    if isinstance(ids, dict):
+        for v in ids.values():
+            if isinstance(v, str):
+                candidates.append(v)
+    doi = work.get("doi")
+    if isinstance(doi, str):
+        candidates.append(doi)
+    oa = work.get("open_access")
+    if isinstance(oa, dict):
+        ou = oa.get("oa_url")
+        if isinstance(ou, str):
+            candidates.append(ou)
+    locs: list[Any] = []
+    primary = work.get("primary_location")
+    if primary:
+        locs.append(primary)
+    locs.extend(work.get("locations") or [])
+    for loc in locs:
+        if not isinstance(loc, dict):
+            continue
+        for key in ("landing_page_url", "pdf_url"):
+            u = loc.get(key)
+            if isinstance(u, str):
+                candidates.append(u)
+    for c in candidates:
+        aid = extract_arxiv_id(c)
+        if aid:
+            return _arxiv_abs_url(aid)
+    return None
+
+
+def search_arxiv_by_title(title: str) -> str | None:
+    """Best-effort arXiv API lookup by title; None on miss or error."""
+    q = title.strip()
+    if not q:
+        return None
+    try:
+        r = requests.get(
+            "https://export.arxiv.org/api/query",
+            params={"search_query": f'ti:"{q}"', "max_results": 5},
+            timeout=12,
+            headers=_HTTP_HEADERS,
+        )
+        r.raise_for_status()
+    except requests.RequestException as e:
+        logger.info("arXiv title search failed for %r: %s", q[:80], e)
+        return None
+    try:
+        root = ET.fromstring(r.content)
+    except ET.ParseError:
+        logger.debug("arXiv title search: XML parse failed for %r", q[:80])
+        return None
+    for entry in root.findall("atom:entry", _ATOM_NS):
+        et = entry.findtext("atom:title", default="", namespaces=_ATOM_NS) or ""
+        et = re.sub(r"\s+", " ", et).strip()
+        if not _titles_match(q, et):
+            continue
+        eid = entry.findtext("atom:id", default="", namespaces=_ATOM_NS) or ""
+        aid = extract_arxiv_id(eid)
+        if aid:
+            return _arxiv_abs_url(aid)
+    return None
+
+
+def _work_is_closed_access(work: dict[str, Any] | None) -> bool:
+    if not work:
+        return True
+    oa = work.get("open_access")
+    if isinstance(oa, dict) and oa.get("is_oa") is True:
+        return False
+    return True
+
+
+def enrichment_with_arxiv(
+    en: PaperEnrichment | None,
+    work: dict[str, Any] | None,
+    article: ArticleInfo,
+) -> PaperEnrichment | None:
+    """Attach an arXiv abs URL when the journal link is closed-access or already arXiv."""
+    url: str | None = None
+    aid = extract_arxiv_id(str(article.link))
+    if aid:
+        url = _arxiv_abs_url(aid)
+    if not url:
+        url = arxiv_url_from_work(work)
+    if not url and _work_is_closed_access(work):
+        url = search_arxiv_by_title(article.title)
+    if not url:
+        return en
+    if en is None:
+        return PaperEnrichment(
+            top_author_name="Unknown",
+            first_affiliation="Unknown",
+            last_affiliation="Unknown",
+            arxiv_url=url,
+        )
+    return replace(en, arxiv_url=url)
 
 
 def direct_openalex_work_urls(link: str) -> list[str]:
@@ -504,6 +701,8 @@ def _load_author_metric_cache(
         return {}
     if not isinstance(doc, dict):
         return {}
+    if doc.get("version") != _AUTHOR_CACHE_VERSION:
+        return {}
     authors = doc.get("authors")
     if not isinstance(authors, dict):
         return {}
@@ -518,6 +717,10 @@ def _load_author_metric_cache(
             continue
         if cached_at <= 0 or (now - cached_at) > ttl_seconds:
             continue
+        raw_insts = row.get("institutions")
+        if not isinstance(raw_insts, list):
+            continue
+        insts = tuple(str(x).strip() for x in raw_insts if str(x).strip())
         raw_h = row.get("h_index")
         h: int | None
         if raw_h is None:
@@ -530,6 +733,7 @@ def _load_author_metric_cache(
         out[str(key)] = AuthorMetric(
             display_name=str(row.get("display_name") or "Unknown"),
             h_index=h,
+            institutions=insts,
         )
     return out
 
@@ -550,6 +754,7 @@ def _save_author_metric_cache(
         authors[key] = {
             "display_name": metric.display_name,
             "h_index": metric.h_index,
+            "institutions": list(metric.institutions),
             "cached_at": now,
         }
     doc = {"version": _AUTHOR_CACHE_VERSION, "authors": authors}
@@ -645,6 +850,21 @@ def fetch_work(article: ArticleInfo, mailto: str) -> Any | None:
     return None
 
 
+def _institutions_from_author_payload(data: dict[str, Any]) -> tuple[str, ...]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for inst in data.get("last_known_institutions") or []:
+        if not isinstance(inst, dict):
+            continue
+        dn = str(inst.get("display_name") or "").strip()
+        key = _norm_institution(dn)
+        if not dn or key in seen:
+            continue
+        seen.add(key)
+        out.append(dn)
+    return tuple(out)
+
+
 def fetch_author_metric(
     author_openalex_id_url: str,
     mailto: str,
@@ -674,7 +894,12 @@ def fetch_author_metric(
                 except (TypeError, ValueError):
                     h = None
         plausible: int | None = None if h is None else _plausible_author_h_index(h)
-        metric = AuthorMetric(display_name=name or "Unknown", h_index=plausible)
+        insts = _institutions_from_author_payload(data)
+        metric = AuthorMetric(
+            display_name=name or "Unknown",
+            h_index=plausible,
+            institutions=insts,
+        )
     if cache is not None:
         cache[key] = metric
     return metric
@@ -731,6 +956,16 @@ def build_enrichment_for_work(
         m = metrics_by_author_url.get(
             aid, AuthorMetric(display_name="Unknown", h_index=None)
         )
+        paper_insts = _paper_institutions(a)
+        if not _author_metric_trusted(m, paper_insts):
+            logger.info(
+                "OpenAlex: skipping untrusted author profile %s (%s, h=%s, %d institutions)",
+                aid,
+                m.display_name or "Unknown",
+                m.h_index,
+                len(m.institutions),
+            )
+            continue
         if best_idx is None:
             best_metric = m
             best_idx = idx
@@ -748,17 +983,15 @@ def build_enrichment_for_work(
     if best_idx is None:
         top_name = "Unknown"
         top_h = None
+        top_aff = "Unknown"
     else:
         top_name = best_metric.display_name
         top_h = best_metric.h_index
+        top_aff = _affiliation_matching_author(authorships[best_idx], best_metric)
 
     first_a, last_a = _first_last_authorships(authorships)
     first_aff = affiliation_for_authorship(first_a) if first_a else "Unknown"
     last_aff = affiliation_for_authorship(last_a) if last_a else "Unknown"
-
-    top_aff = "Unknown"
-    if best_idx is not None and 0 <= best_idx < len(authorships):
-        top_aff = affiliation_for_authorship(authorships[best_idx])
 
     return PaperEnrichment(
         top_author_name=top_name,
@@ -862,5 +1095,5 @@ def batch_enrich_articles(
     for art in articles:
         link = str(art.link)
         en = build_enrichment_for_work(link_to_work.get(link), metrics)
-        out[link] = en
+        out[link] = enrichment_with_arxiv(en, link_to_work.get(link), art)
     return out

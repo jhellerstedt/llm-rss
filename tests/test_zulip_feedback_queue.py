@@ -58,6 +58,17 @@ class TestPaperEnrichmentJson(unittest.TestCase):
         self.assertIsNone(paper_enrichment_to_json(None))
         self.assertIsNone(paper_enrichment_from_json(None))
 
+    def test_roundtrip_arxiv_url(self) -> None:
+        en = PaperEnrichment(
+            top_author_name="A",
+            first_affiliation="X",
+            last_affiliation="Y",
+            top_h_index=10,
+            arxiv_url="https://arxiv.org/abs/2401.00001",
+        )
+        back = paper_enrichment_from_json(paper_enrichment_to_json(en))
+        self.assertEqual(back, en)
+
 
 class TestFeedbackQueuePath(unittest.TestCase):
     def test_default_stem(self) -> None:
@@ -114,6 +125,36 @@ class TestEnqueueDedupe(unittest.TestCase):
         doc = self._read_queue()
         self.assertEqual(len(doc["queues"]), 1)
         self.assertEqual(len(doc["queues"][0]["pending"]), 1)
+
+    def test_enqueue_skips_when_arxiv_alias_already_posted(self) -> None:
+        journal = "https://www.nature.com/articles/s41586-026-10638-w"
+        arxiv = "https://arxiv.org/abs/2401.00001"
+        en = PaperEnrichment(
+            top_author_name="A",
+            first_affiliation="X",
+            last_affiliation="Y",
+            arxiv_url=arxiv,
+        )
+        zulip_sources = [{"realm": "R1", "stream": "general"}]
+        msgs_by_pair = {
+            ("r1", "general"): [
+                {
+                    "sender_email": "bot@example.com",
+                    "content": f"Paper\n\nLink: {arxiv}",
+                }
+            ]
+        }
+        n = enqueue_feedback_ranking_for_group(
+            self.cfg_path,
+            {},
+            zulip_sources,
+            msgs_by_pair,
+            [("Paper", journal, en)],
+            group_name="g1",
+            dryrun=True,
+            zulip_realms={"r1": {"email": "bot@example.com"}},
+        )
+        self.assertEqual(n, 0)
 
     def test_skips_if_already_in_topic(self) -> None:
         zulip_sources = [{"realm": "R1", "stream": "general"}]

@@ -692,14 +692,15 @@ def process_group(
 
     new_items: list[FeedItem] = []
     for article, reply in passing:
-        meta = format_enrichment_for_feed(
-            enrichment_by_link.get(str(article.link))
-        ).strip()
+        en = enrichment_by_link.get(str(article.link))
+        meta = format_enrichment_for_feed(en).strip()
         desc_parts = [
             f"{reply.relevance=}\n{reply.impact=}",
         ]
         if meta:
             desc_parts.append(meta)
+        if en is not None and en.arxiv_url:
+            desc_parts.append(f"arXiv: {en.arxiv_url}")
         desc_parts.append(article.abstract)
         description = "\n\n".join(desc_parts)
         new_items.append(
