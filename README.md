@@ -35,7 +35,7 @@ LLM-RSS reads titles and abstracts from science RSS feeds (Nature, arXiv, APS, a
    **Optional: OpenRouter** (alternative LLM for scoring, Zulip summarization, and journal curation):
    - Add an `[openrouter]` section in your TOML (see [config.d/config.toml.example](config.d/config.toml.example)).
    - Set `OPENROUTER_API_KEY` in `.env` (or the environment).
-   - Optionally set `OPENROUTER_MODEL` in `.env` or `model` in config (default: `~anthropic/claude-haiku-latest`, which tracks the latest Haiku release).
+   - Optionally set `OPENROUTER_MODEL` in `.env` or `model` in config (default: `~anthropic/claude-haiku-latest`, which tracks the latest Haiku release). Keep an explicit Haiku slug rather than OpenRouter Auto Router; see [docs/openrouter-model-selection.md](docs/openrouter-model-selection.md).
    - Use `route_to_openrouter` to choose which call types use OpenRouter instead of Kagi; Kagi remains used for web-search-dependent calls (e.g. OpenAlex metadata backfill).
    - Before RSS/scoring, the run checks remaining OpenRouter funds (`GET /api/v1/key`, and `GET /api/v1/credits` when the key allows it) against an upper-bound cost for the whole config. If funds are short, it aborts with one ERROR (Zulip run digest still posts). Completions send `max_tokens` (default 4096). Set `credit_check = false` under `[openrouter]` to skip the preflight.
 
