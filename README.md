@@ -115,6 +115,7 @@ Mention the realm bot in the configured stream (any topic), or DM it:
 @bot help
 @bot list
 @bot add https://orcid.org/0000-0002-1825-0097
+@bot add https://orcid.org/0000-0002-1825-0097 https://orcid.org/0000-0001-5109-3700
 @bot remove 0000-0002-1825-0097
 ```
 

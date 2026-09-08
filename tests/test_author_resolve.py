@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import author_resolve as ar
-from author_resolve import AuthorResolveError, parse_author_input
+from author_resolve import AuthorResolveError, iter_add_inputs, parse_author_input
 
 
 def _resp(json_data=None, text="", status=200):
@@ -44,6 +44,43 @@ class TestParseInput(unittest.TestCase):
 
     def test_parse_unknown(self):
         self.assertEqual(parse_author_input("just a name")[0], "unknown")
+
+
+class TestIterAddInputs(unittest.TestCase):
+    def test_multiple_orcid_urls(self):
+        got = iter_add_inputs(
+            "https://orcid.org/0000-0002-1825-0097 "
+            "https://orcid.org/0000-0001-5109-3700"
+        )
+        self.assertEqual(
+            got,
+            [
+                "https://orcid.org/0000-0002-1825-0097",
+                "https://orcid.org/0000-0001-5109-3700",
+            ],
+        )
+
+    def test_newlines_commas_and_bare_ids(self):
+        got = iter_add_inputs(
+            "0000-0002-1825-0097,\n0000-0001-5109-3700"
+        )
+        self.assertEqual(
+            got,
+            [
+                "https://orcid.org/0000-0002-1825-0097",
+                "https://orcid.org/0000-0001-5109-3700",
+            ],
+        )
+
+    def test_dedupes_same_orcid(self):
+        got = iter_add_inputs(
+            "https://orcid.org/0000-0002-1825-0097 "
+            "0000-0002-1825-0097"
+        )
+        self.assertEqual(got, ["https://orcid.org/0000-0002-1825-0097"])
+
+    def test_single_unknown_passthrough(self):
+        self.assertEqual(iter_add_inputs("just a name"), ["just a name"])
 
 
 class TestResolve(unittest.TestCase):

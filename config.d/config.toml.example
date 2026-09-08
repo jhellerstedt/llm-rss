@@ -115,6 +115,7 @@ context_max_chars = 12000
 #   @bot help
 #   @bot list
 #   @bot add https://orcid.org/0000-0002-1825-0097
+#   @bot add https://orcid.org/0000-0002-1825-0097 https://orcid.org/0000-0001-5109-3700
 #   @bot add https://scholar.google.com/citations?user=XXXX
 #   @bot remove 0000-0002-1825-0097
 # [author_whitelist]

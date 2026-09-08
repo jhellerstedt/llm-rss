@@ -171,6 +171,60 @@ class TestHandleCommand(unittest.TestCase):
         self.assertIn("Josiah Carberry", text)
         self.assertIn("0000-0002-1825-0097", format_list_reply(wl))
 
+    @patch("author_whitelist_bot.resolve")
+    def test_add_multiple_orcids(self, mock_resolve):
+        a1 = _author()
+        a2 = WhitelistedAuthor(
+            id="https://orcid.org/0000-0001-5109-3700",
+            display_name="Jane Doe",
+            name_aliases=["Jane Doe"],
+            orcid="0000-0001-5109-3700",
+        )
+
+        def _side(ident, **kwargs):
+            if "1825-0097" in ident:
+                return a1
+            if "5109-3700" in ident:
+                return a2
+            raise AssertionError(ident)
+
+        mock_resolve.side_effect = _side
+        wl = AuthorWhitelist()
+        text, success, changed = handle_command(
+            wl,
+            "add",
+            "https://orcid.org/0000-0002-1825-0097\nhttps://orcid.org/0000-0001-5109-3700",
+        )
+        self.assertTrue(success and changed)
+        self.assertEqual(len(wl.authors), 2)
+        self.assertIn("Josiah Carberry", text)
+        self.assertIn("Jane Doe", text)
+        self.assertEqual(mock_resolve.call_count, 2)
+
+    @patch("author_whitelist_bot.resolve")
+    def test_add_batch_partial_failure(self, mock_resolve):
+        from author_resolve import AuthorResolveError
+
+        def _side(ident, **kwargs):
+            if "1825-0097" in ident:
+                return _author()
+            raise AuthorResolveError("orcid 0000-0001-5109-3700: no data")
+
+        mock_resolve.side_effect = _side
+        wl = AuthorWhitelist()
+        text, success, changed = handle_command(
+            wl,
+            "add",
+            "https://orcid.org/0000-0002-1825-0097 https://orcid.org/0000-0001-5109-3700",
+        )
+        self.assertTrue(success and changed)
+        self.assertEqual(len(wl.authors), 1)
+        self.assertIn("Josiah Carberry", text)
+        self.assertIn("Could not add", text)
+
+    def test_help_mentions_multiple_orcids(self):
+        self.assertIn("multiple", format_help_reply().lower())
+
     def test_should_poll_skipped_when_interactive(self):
         self.assertTrue(
             should_poll_whitelist_commands(

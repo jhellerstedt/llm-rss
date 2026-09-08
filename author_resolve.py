@@ -40,6 +40,35 @@ def parse_author_input(s: str) -> tuple[str, str]:
     return ("unknown", text)
 
 
+def iter_add_inputs(s: str) -> list[str]:
+    """Split an add argument into identifiers (ORCID, Scholar URL), preserving order.
+
+    Multiple ORCIDs in one message (whitespace, commas, or newlines) become
+    separate items. If none are found, the trimmed original string is returned
+    so ``resolve`` can still reject unknown input.
+    """
+    text = (s or "").strip()
+    if not text:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _ORCID.finditer(text):
+        orcid = m.group(1).upper()
+        if orcid in seen:
+            continue
+        seen.add(orcid)
+        out.append(f"https://orcid.org/{orcid}")
+    for m in re.finditer(
+        r"https?://scholar\.google\.[^\s<>\"']+", text, re.IGNORECASE
+    ):
+        kind, val = parse_author_input(m.group(0))
+        if kind != "scholar" or val in seen:
+            continue
+        seen.add(val)
+        out.append(m.group(0))
+    return out or [text]
+
+
 def _get(url: str, *, timeout: int = 20, headers: dict | None = None):
     return requests.get(url, timeout=timeout, headers=headers or _HEADERS)
 

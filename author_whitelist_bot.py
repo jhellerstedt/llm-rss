@@ -12,7 +12,7 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
-from author_resolve import AuthorResolveError, resolve
+from author_resolve import AuthorResolveError, iter_add_inputs, resolve
 from author_whitelist import AuthorWhitelist
 from api_usage import record_zulip_api
 from zulip_context import _client_for_realm, fetch_messages_narrow
@@ -26,7 +26,8 @@ HELP_TEXT = (
     "Author whitelist commands:\n"
     "- `help` — this message\n"
     "- `list` — authors you follow (name + ORCID)\n"
-    "- `add <ORCID id/URL or Google Scholar profile URL>`\n"
+    "- `add <ORCID id/URL or Google Scholar profile URL>` "
+    "(you can paste multiple ORCID URLs in one message)\n"
     "- `remove <ORCID/OpenAlex id or name>`\n\n"
     "In a stream, mention the bot first (for example `@bot list`). "
     "Direct messages do not need a mention.\n"
@@ -92,6 +93,32 @@ def format_added_reply(author, added: bool) -> str:
     return f"Updated author **{author.display_name}**{aff}{tail}"
 
 
+def format_batch_added_reply(
+    results: list[tuple[str, object, object]],
+) -> str:
+    """Format mixed add results: ('ok', author, added) or ('err', ident, message)."""
+    ok_lines: list[str] = []
+    err_lines: list[str] = []
+    for kind, a, b in results:
+        if kind == "ok":
+            aff = f" ({a.affiliation})" if a.affiliation else ""
+            ident = a.orcid or a.openalex_id or a.id
+            verb = "Added" if b else "Updated"
+            ok_lines.append(f"- {verb} **{a.display_name}**{aff} ({ident})")
+        else:
+            err_lines.append(f"- `{a}` — {b}")
+    parts: list[str] = []
+    if ok_lines:
+        n = len(ok_lines)
+        parts.append(f"Added {n} author{'s' if n != 1 else ''}:")
+        parts.extend(ok_lines)
+        parts.append("Their papers will now always be included regardless of score.")
+    if err_lines:
+        parts.append("Could not add:")
+        parts.extend(err_lines)
+    return "\n".join(parts)
+
+
 def format_removed_reply(author) -> str:
     return f"Removed **{author.display_name}** from the whitelist."
 
@@ -110,7 +137,8 @@ def format_list_reply(wl: AuthorWhitelist) -> str:
 def format_error_reply(msg: str) -> str:
     return (
         f"Could not process that: {msg}\n"
-        "Usage: `add <ORCID id/URL or Google Scholar profile URL>`, "
+        "Usage: `add <ORCID id/URL or Google Scholar profile URL>` "
+        "(multiple ORCID URLs allowed), "
         "`remove <ORCID/OpenAlex id/name>`, `list`, or `help`."
     )
 
@@ -138,12 +166,30 @@ def handle_command(
             return format_removed_reply(removed), True, True
         return format_error_reply(f"no whitelist entry matched '{arg}'"), False, False
     if action == "add":
-        try:
-            author = resolve(arg, mailto=mailto, added_by=added_by)
-        except AuthorResolveError as e:
-            return format_error_reply(str(e)), False, False
-        added = whitelist.add(author)
-        return format_added_reply(author, added), True, True
+        inputs = iter_add_inputs(arg)
+        if not inputs:
+            return format_error_reply("no ORCID or Scholar URL found"), False, False
+        if len(inputs) == 1:
+            try:
+                author = resolve(inputs[0], mailto=mailto, added_by=added_by)
+            except AuthorResolveError as e:
+                return format_error_reply(str(e)), False, False
+            added = whitelist.add(author)
+            return format_added_reply(author, added), True, True
+        results: list[tuple[str, object, object]] = []
+        changed = False
+        any_ok = False
+        for ident in inputs:
+            try:
+                author = resolve(ident, mailto=mailto, added_by=added_by)
+            except AuthorResolveError as e:
+                results.append(("err", ident, str(e)))
+                continue
+            added = whitelist.add(author)
+            any_ok = True
+            changed = True
+            results.append(("ok", author, added))
+        return format_batch_added_reply(results), any_ok, changed
     return format_help_reply(), True, False
 
 
