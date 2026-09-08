@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -21,14 +22,40 @@ logger = logging.getLogger(__name__)
 _DEFAULT_LOOKBACK_HOURS = 168
 _DEFAULT_MAX_MESSAGES = 200
 
+HELP_TEXT = (
+    "Author whitelist commands:\n"
+    "- `help` — this message\n"
+    "- `list` — authors you follow (name + ORCID)\n"
+    "- `add <ORCID id/URL or Google Scholar profile URL>`\n"
+    "- `remove <ORCID/OpenAlex id or name>`\n\n"
+    "In a stream, mention the bot first (for example `@bot list`). "
+    "Direct messages do not need a mention.\n"
+    "Papers by listed authors are always included on the **next** RSS feed run."
+)
+
+
+def format_help_reply() -> str:
+    return HELP_TEXT
+
+
+def should_poll_whitelist_commands(aw_cfg: dict[str, Any] | None) -> bool:
+    """True when the feed job should still poll a command topic."""
+    if not aw_cfg or not aw_cfg.get("enabled", True):
+        return False
+    if aw_cfg.get("interactive"):
+        return False
+    return bool(aw_cfg.get("command_source"))
+
 
 def parse_command(content: str) -> tuple[str, str] | None:
-    """Return (action, arg) for add/remove/list, else None."""
+    """Return (action, arg) for add/remove/list/help, else None."""
     text = (content or "").strip()
     text = re.sub(r"^@(?:\*\*[^*]+\*\*|[\w.\-]+)\s+", "", text).strip()
     if not text:
         return None
     low = text.lower()
+    if low == "help" or low.startswith("help "):
+        return ("help", "")
     if low == "list" or low.startswith("list "):
         return ("list", "")
     for action in ("add", "remove"):
@@ -84,8 +111,40 @@ def format_error_reply(msg: str) -> str:
     return (
         f"Could not process that: {msg}\n"
         "Usage: `add <ORCID id/URL or Google Scholar profile URL>`, "
-        "`remove <ORCID/OpenAlex id/name>`, or `list`."
+        "`remove <ORCID/OpenAlex id/name>`, `list`, or `help`."
     )
+
+
+def handle_command(
+    whitelist: AuthorWhitelist,
+    action: str,
+    arg: str,
+    *,
+    mailto: str | None = None,
+    added_by: str | None = None,
+    wl_path: Path | None = None,
+) -> tuple[str, bool, bool]:
+    """Apply one command. Return (reply_text, success, changed)."""
+    if action == "help":
+        return format_help_reply(), True, False
+    if action == "list":
+        return format_list_reply(whitelist), True, False
+    if wl_path is not None:
+        disk = AuthorWhitelist.load(wl_path)
+        whitelist.authors = list(disk.authors)
+    if action == "remove":
+        removed = whitelist.remove(arg)
+        if removed is not None:
+            return format_removed_reply(removed), True, True
+        return format_error_reply(f"no whitelist entry matched '{arg}'"), False, False
+    if action == "add":
+        try:
+            author = resolve(arg, mailto=mailto, added_by=added_by)
+        except AuthorResolveError as e:
+            return format_error_reply(str(e)), False, False
+        added = whitelist.add(author)
+        return format_added_reply(author, added), True, True
+    return format_help_reply(), True, False
 
 
 def _send(client, stream: str, topic: str, content: str, dryrun: bool) -> None:
@@ -178,37 +237,16 @@ def run_author_whitelist_bot(
         action, arg = cmd
         success = False
         try:
-            if action == "list":
-                _send(client, stream, topic, format_list_reply(whitelist), dryrun)
-                success = True
-            elif action == "remove":
-                removed = whitelist.remove(arg)
-                if removed is not None:
-                    changed = True
-                    _send(
-                        client, stream, topic, format_removed_reply(removed), dryrun
-                    )
-                    success = True
-                else:
-                    _send(
-                        client,
-                        stream,
-                        topic,
-                        format_error_reply(f"no whitelist entry matched '{arg}'"),
-                        dryrun,
-                    )
-            elif action == "add":
-                author = resolve(
-                    arg, mailto=mailto, added_by=msg.get("sender_email")
-                )
-                added = whitelist.add(author)
+            reply, success, cmd_changed = handle_command(
+                whitelist,
+                action,
+                arg,
+                mailto=mailto,
+                added_by=msg.get("sender_email"),
+            )
+            if cmd_changed:
                 changed = True
-                _send(
-                    client, stream, topic, format_added_reply(author, added), dryrun
-                )
-                success = True
-        except AuthorResolveError as e:
-            _send(client, stream, topic, format_error_reply(str(e)), dryrun)
+            _send(client, stream, topic, reply, dryrun)
         except Exception as e:
             logger.exception("[author-whitelist] command failed: %s", arg)
             _send(

@@ -101,7 +101,26 @@ Papers by specific researchers can be **always included**, bypassing the LLM rel
 
 Enable it with an `[author_whitelist]` section (see `config.d/config.toml.example`). The whitelist is a JSON file (`config.d/author_whitelist.json`, gitignored as local state).
 
-Manage it by posting in the configured Zulip topic (default `author whitelist`):
+### Interactive Zulip bot (Docker)
+
+For instant `help` / `list` / `add` / `remove` (independent of the feed cron), set `[author_whitelist.interactive]` and run:
+
+```bash
+docker compose up -d zulip-bot
+```
+
+Mention the realm bot in the configured stream (any topic), or DM it:
+
+```
+@bot help
+@bot list
+@bot add https://orcid.org/0000-0002-1825-0097
+@bot remove 0000-0002-1825-0097
+```
+
+The container bind-mounts `./config.d` (TOML, `zulip_realms.json`, whitelist JSON). Use **one replica** so a single process owns the bot’s event queue. Force-include in RSS still happens on the next feed run.
+
+Without `interactive`, you can still manage the list by posting in a dedicated topic (`command_source`); the feed job polls that topic each run:
 
 ```
 add https://orcid.org/0000-0002-1825-0097
@@ -110,7 +129,7 @@ remove 0000-0002-1825-0097
 list
 ```
 
-The bot resolves the identity (ORCID + OpenAlex), adds the author, and replies with what it matched so you can verify; `remove` undoes a wrong match. Successful commands get a `:+1:` reaction on your message; failures get `:-1:`. Commands are processed once per cron run.
+The bot resolves the identity (ORCID + OpenAlex), adds the author, and replies with what it matched so you can verify; `remove` undoes a wrong match. Successful commands get a `:+1:` reaction; failures get `:-1:`. The Docker listener replies immediately; the topic poll runs once per feed job.
 
 ## Supported RSS providers
 

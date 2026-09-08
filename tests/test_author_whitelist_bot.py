@@ -3,7 +3,14 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from author_whitelist import AuthorWhitelist, WhitelistedAuthor
-from author_whitelist_bot import parse_command, run_author_whitelist_bot
+from author_whitelist_bot import (
+    format_help_reply,
+    format_list_reply,
+    handle_command,
+    parse_command,
+    run_author_whitelist_bot,
+    should_poll_whitelist_commands,
+)
 
 REALMS = {"tuesday": {"email": "bot@x.com", "api_key": "k", "site": "https://x"}}
 SOURCE = {
@@ -62,6 +69,11 @@ class TestParseCommand(unittest.TestCase):
 
     def test_non_command(self):
         self.assertIsNone(parse_command("hello team, nice paper"))
+
+    def test_help(self):
+        self.assertEqual(parse_command("help"), ("help", ""))
+        self.assertEqual(parse_command("@bot help"), ("help", ""))
+        self.assertEqual(parse_command("@**kagi-bot** help"), ("help", ""))
 
 
 class TestRunBot(unittest.TestCase):
@@ -145,6 +157,40 @@ class TestRunBot(unittest.TestCase):
         client.send_message.assert_not_called()
         client.add_reaction.assert_not_called()
         self.assertEqual(len(wl.authors), 1)
+
+
+class TestHandleCommand(unittest.TestCase):
+    def test_help_and_list_orcid(self):
+        self.assertIn("`list`", format_help_reply())
+        wl = AuthorWhitelist()
+        text, success, changed = handle_command(wl, "help", "")
+        self.assertTrue(success and not changed)
+        wl.add(_author())
+        text, success, changed = handle_command(wl, "list", "")
+        self.assertTrue(success and not changed)
+        self.assertIn("Josiah Carberry", text)
+        self.assertIn("0000-0002-1825-0097", format_list_reply(wl))
+
+    def test_should_poll_skipped_when_interactive(self):
+        self.assertTrue(
+            should_poll_whitelist_commands(
+                {"command_source": {"realm": "x", "stream": "s"}}
+            )
+        )
+        self.assertFalse(
+            should_poll_whitelist_commands(
+                {
+                    "command_source": {"realm": "x", "stream": "s"},
+                    "interactive": {"realm": "x", "stream": "science"},
+                }
+            )
+        )
+        self.assertFalse(should_poll_whitelist_commands(None))
+        self.assertFalse(
+            should_poll_whitelist_commands(
+                {"enabled": False, "command_source": {"realm": "x", "stream": "s"}}
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -88,7 +88,10 @@ from zulip_journal_suggestions import (
 from zulip_journal_weekly_summary import maybe_post_weekly_journal_config_summary
 from zulip_run_error_report import RunLogCollector, maybe_post_run_error_summary
 from author_whitelist import AuthorWhitelist, force_included_whitelist_items
-from author_whitelist_bot import run_author_whitelist_bot
+from author_whitelist_bot import (
+    run_author_whitelist_bot,
+    should_poll_whitelist_commands,
+)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -834,7 +837,7 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 wl_path = (config_path.parent / wl_path).resolve()
             author_whitelist = AuthorWhitelist.load(wl_path)
             command_source = aw_cfg.get("command_source")
-            if command_source and zulip_realms:
+            if should_poll_whitelist_commands(aw_cfg) and zulip_realms:
                 aw_mailto = openalex_cfg.get("mailto") or os.environ.get(
                     "OPENALEX_MAILTO"
                 )
