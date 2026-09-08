@@ -12,3 +12,7 @@
 # Secrets in local config (tracked templates: *.example.* or README in config.d/)
 config.d/**/*.toml
 config.d/**/*.json
+
+# Host-specific compose tweaks (uid/gid). Do not commit.
+docker-compose.override.yaml
+docker-compose.override.yml

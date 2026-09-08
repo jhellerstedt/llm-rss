@@ -10,10 +10,13 @@ services:
   # Instant Zulip author-whitelist commands (independent of the feed cron).
   # Requires config.d/config.toml with [author_whitelist.interactive] and
   # zulip_realms.json. Start with: docker compose up -d zulip-bot
+  #
+  # Runs as uid 1000 so bind-mounted author_whitelist.json is owned by the
+  # usual host login, not root. Override with LLM_RSS_UID / LLM_RSS_GID in
+  # .env if the host user is not 1000:1000.
   zulip-bot:
     build: .
     restart: unless-stopped
+    user: "${LLM_RSS_UID:-1000}:${LLM_RSS_GID:-1000}"
     volumes:
       - ./config.d:/app/config.d
-
-
