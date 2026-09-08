@@ -57,6 +57,7 @@ def paper_enrichment_to_json(en: PaperEnrichment | None) -> dict[str, Any] | Non
         "top_author_affiliation": en.top_author_affiliation,
         "author_count": en.author_count,
         "arxiv_url": en.arxiv_url,
+        "doi": en.doi,
     }
 
 
@@ -98,6 +99,11 @@ def paper_enrichment_from_json(data: dict[str, Any] | None) -> PaperEnrichment |
         top_author_affiliation=str(data.get("top_author_affiliation", "Unknown")),
         author_count=author_count,
         arxiv_url=arxiv_url,
+        doi=(
+            str(data["doi"]).strip()
+            if isinstance(data.get("doi"), str) and str(data.get("doi")).strip()
+            else None
+        ),
     )
 
 

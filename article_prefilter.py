@@ -62,18 +62,58 @@ def local_article_score(
     return score
 
 
+def matches_method_include(article: ArticleInfo, phrases: list[str]) -> bool:
+    """True if any non-empty phrase appears in title+abstract (case-insensitive)."""
+    blob = f"{article.title} {article.abstract}".lower()
+    for raw in phrases:
+        p = str(raw).strip().lower()
+        if p and p in blob:
+            return True
+    return False
+
+
 def shortlist_for_kagi_scoring(
     articles: list[ArticleInfo],
     group: dict[str, Any],
     max_candidates: int,
     feedback_signals: dict[str, tuple[int, int]] | None = None,
 ) -> list[ArticleInfo]:
-    """Return up to ``max_candidates`` articles with highest local scores (stable tie-break by title)."""
+    """Return up to ``max_candidates`` articles with highest local scores (stable tie-break by title).
+
+    When ``group["method_include"]`` is non-empty, matching articles are taken
+    first (competing only with each other if they exceed the cap). Remaining
+    slots are filled from non-matching articles via local score.
+    """
     if max_candidates <= 0:
         return []
-    scored = [(local_article_score(a, group, feedback_signals), a.title, i, a) for i, a in enumerate(articles)]
-    scored.sort(key=lambda t: (-t[0], t[1], t[2]))
-    out: list[ArticleInfo] = []
-    for _, _, _, art in scored[:max_candidates]:
-        out.append(art)
-    return out
+    phrases = [str(p) for p in (group.get("method_include") or []) if str(p).strip()]
+    if not phrases:
+        scored = [
+            (local_article_score(a, group, feedback_signals), a.title, i, a)
+            for i, a in enumerate(articles)
+        ]
+        scored.sort(key=lambda t: (-t[0], t[1], t[2]))
+        return [t[3] for t in scored[:max_candidates]]
+
+    method_hits: list[ArticleInfo] = []
+    rest: list[ArticleInfo] = []
+    for art in articles:
+        if matches_method_include(art, phrases):
+            method_hits.append(art)
+        else:
+            rest.append(art)
+
+    method_sl = shortlist_for_kagi_scoring(
+        method_hits,
+        {**group, "method_include": []},
+        min(max_candidates, len(method_hits)),
+        feedback_signals,
+    )
+    remaining = max_candidates - len(method_sl)
+    fill = shortlist_for_kagi_scoring(
+        rest,
+        {**group, "method_include": []},
+        remaining,
+        feedback_signals,
+    )
+    return method_sl + fill

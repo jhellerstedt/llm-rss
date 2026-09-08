@@ -104,6 +104,8 @@ class PaperEnrichment:
     author_count: int | None = None
     #: arXiv abs URL when a preprint is found; prefer this over paywalled journal links.
     arxiv_url: str | None = None
+    #: Journal DOI (bare, lowercased) when OpenAlex resolves a work.
+    doi: str | None = None
 
     def format_block(self) -> str:
         h_label = _h_index_display(self.top_h_index)
@@ -301,6 +303,7 @@ def merge_paper_enrichment(
         top_author_affiliation=top_aff,
         author_count=ac,
         arxiv_url=openalex.arxiv_url or kagi.arxiv_url,
+        doi=openalex.doi or kagi.doi,
     )
 
 
@@ -993,6 +996,12 @@ def build_enrichment_for_work(
     first_aff = affiliation_for_authorship(first_a) if first_a else "Unknown"
     last_aff = affiliation_for_authorship(last_a) if last_a else "Unknown"
 
+    work_doi = work.get("doi")
+    doi: str | None = None
+    if isinstance(work_doi, str) and work_doi.strip():
+        doi = extract_doi_from_link(work_doi.strip()) or work_doi.strip()
+        doi = doi.lower().removeprefix("https://doi.org/").removeprefix("http://doi.org/")
+
     return PaperEnrichment(
         top_author_name=top_name,
         first_affiliation=first_aff,
@@ -1000,6 +1009,7 @@ def build_enrichment_for_work(
         top_h_index=top_h,
         top_author_affiliation=top_aff,
         author_count=len(authorships),
+        doi=doi,
     )
 
 

@@ -1,6 +1,6 @@
 # Catch missed journal / arXiv articles — design
 
-Status: proposed (awaiting review)
+Status: approved (2026-09-08 brainstorm; implement 2026-09-09)
 Date: 2026-09-08
 
 ## Problem

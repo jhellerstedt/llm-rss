@@ -87,11 +87,13 @@ If you use `feedback_ranking_use_queue`, add a separate hourly (or other interva
 ## Output (RSS XML files)
 
 - Each `[[groups]]` entry has an `rss_path` (for example `data/quantum_computing.xml`). That is the only file this group updates.
-- If the same paper URL passes thresholds in multiple groups in one run, it is kept only in the group where it scored highest on relevance (then impact); other groups drop it from new items and from persisted history for that run.
+- If the same paper (DOI / arXiv id / URL) passes thresholds in multiple groups in one run, it is kept only in the group where it scored highest on relevance (then impact); other groups drop it from new items and from persisted history for that run.
+- Feed items are no longer dropped for being older than `period` hours. Each config has a seen-set file (`<stem>.seen_articles.json`). The first run with no file records everything currently in the feeds and scores nothing; later runs score only unseen items. `period` is still used for Zulip feedback-control windows.
+- Optional per-group `method_include` phrases (for example STM / ncAFM) are always shortlisted for scoring before the usual local-score fill.
 - **XML is written only when** the group has at least one article that passes the LLM filters: `relevance > relevance_threshold` **and** `impact > impact_threshold`. Otherwise the run **does not overwrite** that path (any previous file on disk is left as-is).
 - Console messages:
   - `Wrote N items to …` — a new RSS file was written (or replaced).
-  - `no articles in the time window` — the feed URLs returned nothing recent for `period` (hours).
+  - `Bootstrapped seen set with N key(s)` — first run after adding the seen file; no scoring.
   - `N article(s) scored, none above relevance>… and impact>…` — articles were scored by Kagi but every one fell at or below your thresholds.
   - `dry run — would write …` — `--dryrun`: scoring ran, file not written.
 

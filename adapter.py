@@ -55,6 +55,8 @@ class BaseRSSAdapter:
         return lambda articleinfo: datetime.now(timezone.utc) - articleinfo.updated < timedelta(hours=hours)
 
     def recent_articles(self, hours=24) -> Iterator[ArticleInfo]:
+        if hours is None:
+            return iter(self.articles)
         return filter(self.recent_filter(hours=hours), self.articles)
 
     def _get_entry_title(self, entry) -> str:

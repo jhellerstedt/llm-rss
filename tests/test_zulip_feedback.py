@@ -7,6 +7,7 @@ from zulip_feedback import (
     GroupFeedbackCandidates,
     aggregate_feedback_signals,
     count_thumbs_reactions,
+    feedback_link_keys,
     feedback_ranking_ready_for_next_post,
     filter_to_group_winning_links,
     format_feedback_post_body,
@@ -134,7 +135,9 @@ class TestZulipFeedbackAggregate(unittest.TestCase):
     def test_links_announced(self) -> None:
         url = "https://nature.com/nature/articles/s41467-020-19000-0"
         msgs = [{"content": f"T\n\nLink: {url}"}]
-        self.assertEqual(links_announced_in_messages(msgs), {normalize_link(url)})
+        announced = links_announced_in_messages(msgs)
+        self.assertTrue(announced)
+        self.assertTrue(announced >= feedback_link_keys(url))
 
     def test_latest_feedback_ranking_message(self) -> None:
         u1 = "https://arxiv.org/abs/2401.00001"
@@ -286,6 +289,22 @@ class TestSelectTopRankedForFeedback(unittest.TestCase):
         rows = [
             ("A", "https://x.org/p", 9, 9, None),
             ("B", "https://x.org/p/", 8, 8, None),
+        ]
+        picked = select_top_ranked_for_feedback_posts(rows, max_posts=2)
+        self.assertEqual(len(picked), 1)
+
+    def test_journal_and_arxiv_alias_once(self) -> None:
+        journal = "https://dx.doi.org/10.1021/acs.nanolett.6c03195"
+        arxiv = "https://arxiv.org/abs/2609.02567"
+        en = PaperEnrichment(
+            top_author_name="A",
+            first_affiliation="X",
+            last_affiliation="Y",
+            doi="10.1021/acs.nanolett.6c03195",
+        )
+        rows = [
+            ("J", journal, 8, 5, None),
+            ("A", arxiv, 7, 4, en),
         ]
         picked = select_top_ranked_for_feedback_posts(rows, max_posts=2)
         self.assertEqual(len(picked), 1)
