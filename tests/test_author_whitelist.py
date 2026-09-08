@@ -62,6 +62,13 @@ class TestStore(unittest.TestCase):
                 loaded.get_cursor("tuesday:science:author whitelist"), 42
             )
 
+    def test_save_is_world_readable(self):
+        # Host cron (non-root) must be able to read JSON written by Docker.
+        with TemporaryDirectory() as d:
+            p = Path(d) / "wl.json"
+            AuthorWhitelist().save(p)
+            self.assertEqual(p.stat().st_mode & 0o777, 0o644)
+
     def test_load_missing_file_is_empty(self):
         with TemporaryDirectory() as d:
             self.assertEqual(AuthorWhitelist.load(Path(d) / "nope.json").authors, [])
@@ -71,6 +78,19 @@ class TestStore(unittest.TestCase):
             p = Path(d) / "bad.json"
             p.write_text("{not json", encoding="utf-8")
             self.assertEqual(AuthorWhitelist.load(p).authors, [])
+
+    def test_load_unreadable_is_empty(self):
+        with TemporaryDirectory() as d:
+            p = Path(d) / "wl.json"
+            p.write_text('{"version": 1, "authors": [], "cursor": {}}', encoding="utf-8")
+            p.chmod(0o000)
+            try:
+                with self.assertLogs("author_whitelist", level="ERROR") as cm:
+                    loaded = AuthorWhitelist.load(p)
+                self.assertEqual(loaded.authors, [])
+                self.assertTrue(any("Unreadable author whitelist" in m for m in cm.output))
+            finally:
+                p.chmod(0o644)
 
     def test_add_is_idempotent_and_merges_aliases(self):
         wl = AuthorWhitelist()

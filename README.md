@@ -121,7 +121,7 @@ Mention the realm bot in the configured stream (any topic), or DM it:
 @bot remove 0000-0002-1825-0097
 ```
 
-The container bind-mounts `./config.d` (TOML, `zulip_realms.json`, whitelist JSON). Use **one replica** so a single process owns the bot’s event queue. Force-include in RSS still happens on the next feed run.
+The container bind-mounts `./config.d` (TOML, `zulip_realms.json`, whitelist JSON). It runs as uid/gid **1000** (not root) so the host feed job can read `author_whitelist.json`. If the host user is not `1000:1000`, set `LLM_RSS_UID` / `LLM_RSS_GID` in `.env` before `docker compose up`. Use **one replica** so a single process owns the bot’s event queue. Force-include in RSS still happens on the next feed run.
 
 Without `interactive`, you can still manage the list by posting in a dedicated topic (`command_source`); the feed job polls that topic each run:
 

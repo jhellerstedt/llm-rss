@@ -150,10 +150,13 @@ remains in the file.
 ## Docker
 
 - **`Dockerfile`:** `python:3.12-slim`, install `requirements.txt`, copy
-  application `.py` modules (not `config.d/` secrets). `CMD` runs
+  application `.py` modules (not `config.d/` secrets). Create uid/gid 1000
+  `app` and `USER app` so bind-mounted `author_whitelist.json` is not
+  `root:0600`. `CMD` runs
   `python zulip_interactive_bot.py --config-path config.d/config.toml`.
 - **Compose service `zulip-bot`:** `restart: unless-stopped`, no ports.
-  Bind-mount `./config.d` and `.env` (optional). Working directory is the
+  `user: "${LLM_RSS_UID:-1000}:${LLM_RSS_GID:-1000}"` so the host feed cron
+  can read the same JSON. Bind-mount `./config.d`. Working directory is the
   app root. The existing nginx service stays optional and is **not** required
   for the bot.
 - **Run:** `docker compose up -d zulip-bot`

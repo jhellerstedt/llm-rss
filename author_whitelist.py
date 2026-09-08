@@ -71,6 +71,11 @@ class AuthorWhitelist(BaseModel):
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             return cls.model_validate(data)
+        except PermissionError:
+            logger.exception(
+                "Unreadable author whitelist at %s; treating as empty", path
+            )
+            return cls()
         except Exception:
             logger.exception(
                 "Malformed author whitelist at %s; treating as empty", path
@@ -85,6 +90,8 @@ class AuthorWhitelist(BaseModel):
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(self.model_dump(), fh, indent=2, ensure_ascii=False)
             os.replace(tmp, p)
+            # mkstemp is 0600; host cron must read files the Docker bot writes.
+            os.chmod(p, 0o644)
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
