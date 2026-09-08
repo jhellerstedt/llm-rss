@@ -32,6 +32,7 @@ class GroupPassingScores:
 
     group_name: str
     link_scores: list[LinkScore]
+    identity_keys_by_link: dict[str, set[str]] | None = None
 
 
 def normalize_link(url: str) -> str:
@@ -42,11 +43,23 @@ def normalize_link(url: str) -> str:
 
 
 def winning_group_by_link(batches: list[GroupPassingScores]) -> dict[str, str]:
-    """Map normalized link -> group that owns it (highest relevance, then impact)."""
+    """Map normalized link -> group that owns it (highest relevance, then impact).
+
+    Links whose identity key sets intersect (DOI / arXiv / URL) share one winner.
+    """
+    from paper_identity import cluster_links_by_identity, identity_keys
+
     best: dict[str, tuple[int, int, str]] = {}
+    keysets: dict[str, set[str]] = {}
     for batch in batches:
+        extra = batch.identity_keys_by_link or {}
         for link, rel, imp in batch.link_scores:
             k = normalize_link(link)
+            ikeys = extra.get(link) or extra.get(k)
+            if not ikeys:
+                ikeys = identity_keys(link)
+            keysets.setdefault(k, set()).update(ikeys)
+            keysets[k].add("url:" + k)
             cur = best.get(k)
             if cur is None:
                 best[k] = (rel, imp, batch.group_name)
@@ -55,7 +68,29 @@ def winning_group_by_link(batches: list[GroupPassingScores]) -> dict[str, str]:
                 best[k] = (rel, imp, batch.group_name)
             elif rel == cur[0] and imp == cur[1] and batch.group_name < cur[2]:
                 best[k] = (rel, imp, batch.group_name)
-    return {k: v[2] for k, v in best.items()}
+
+    if not best:
+        return {}
+
+    winners: dict[str, str] = {k: v[2] for k, v in best.items()}
+    for cluster in cluster_links_by_identity(keysets):
+        if len(cluster) < 2:
+            continue
+        ranked = [lnk for lnk in cluster if lnk in best]
+        if not ranked:
+            continue
+        winner_link = ranked[0]
+        for lnk in ranked[1:]:
+            ra, ia, na = best[winner_link]
+            rb, ib, nb = best[lnk]
+            if rb > ra or (rb == ra and ib > ia) or (
+                rb == ra and ib == ia and nb < na
+            ):
+                winner_link = lnk
+        group = best[winner_link][2]
+        for lnk in ranked:
+            winners[lnk] = group
+    return winners
 
 
 def filter_feed_items_for_group(

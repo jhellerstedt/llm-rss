@@ -10,6 +10,7 @@ from typing import Any
 
 from api_usage import record_zulip_api
 from openalex_enrich import PaperEnrichment, format_enrichment_for_feedback_zulip, preferred_public_link
+from paper_identity import identity_keys
 from rss_merge import normalize_link
 from zulip_context import fetch_messages_narrow, strip_zulip_html, _client_for_realm
 
@@ -193,7 +194,7 @@ def links_announced_in_messages(
     for msg in _bot_messages(messages, bot_email, bot_name):
         link = parse_feedback_link_from_body(str(msg.get("content") or ""))
         if link:
-            keys.add(normalize_link(link))
+            keys.update(identity_keys(link))
     return keys
 
 
@@ -392,12 +393,8 @@ def format_feedback_post_body(
 def feedback_link_keys(
     link: str, enrichment: PaperEnrichment | None = None
 ) -> set[str]:
-    """Normalized URLs that identify the same paper for Zulip dedup (journal + arXiv)."""
-    keys = {normalize_link(link)}
-    public = preferred_public_link(link, enrichment)
-    if public:
-        keys.add(normalize_link(public))
-    return keys
+    """Identity keys that identify the same paper for Zulip dedup (journal + arXiv)."""
+    return identity_keys(link, enrichment)
 
 
 def _impact_for_feedback_ranking(
@@ -454,10 +451,10 @@ def select_top_ranked_for_feedback_posts(
     out: list[tuple[str, str, PaperEnrichment | None]] = []
     seen_keys: set[str] = set()
     for title, link, _rel, _imp, en in ranked:
-        key = normalize_link(link)
-        if key in seen_keys:
+        aliases = feedback_link_keys(link, en)
+        if aliases & seen_keys:
             continue
-        seen_keys.add(key)
+        seen_keys.update(aliases)
         out.append((title, link, en))
         if len(out) >= max_posts:
             break

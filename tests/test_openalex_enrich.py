@@ -112,6 +112,23 @@ class TestBuildEnrichment(unittest.TestCase):
         self.assertEqual(en.first_affiliation, "MIT")
         self.assertEqual(en.last_affiliation, "Stanford University")
         self.assertEqual(en.author_count, 3)
+        self.assertIsNone(en.doi)
+
+    def test_work_doi_is_stored(self) -> None:
+        work = {
+            "doi": "https://doi.org/10.1021/acs.nanolett.6c03195",
+            "authorships": [
+                {
+                    "author_position": "first",
+                    "author": {"id": "https://openalex.org/A1"},
+                    "institutions": [{"display_name": "MIT"}],
+                }
+            ],
+        }
+        metrics = {"https://openalex.org/A1": AuthorMetric("Alice", 10, ("MIT",))}
+        en = build_enrichment_for_work(work, metrics)
+        assert en is not None
+        self.assertEqual(en.doi, "10.1021/acs.nanolett.6c03195")
 
     def test_skips_polluted_author_profile_for_top_h(self) -> None:
         """Merged OpenAlex identities (dozens of last-known institutions) must not win."""

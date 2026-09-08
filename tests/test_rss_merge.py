@@ -38,6 +38,44 @@ class TestCrossGroupRssDedup(unittest.TestCase):
         self.assertEqual(kept_alpha, [])
         self.assertEqual(len(kept_beta), 1)
 
+    def test_journal_and_arxiv_cluster_spm_wins(self) -> None:
+        journal = "https://dx.doi.org/10.1021/acs.nanolett.6c03195"
+        arxiv = "https://arxiv.org/abs/2609.02567"
+        from paper_identity import identity_keys
+        from openalex_enrich import PaperEnrichment
+
+        en = PaperEnrichment(
+            top_author_name="A",
+            first_affiliation="X",
+            last_affiliation="Y",
+            doi="10.1021/acs.nanolett.6c03195",
+        )
+        winners = winning_group_by_link(
+            [
+                GroupPassingScores(
+                    "acs_journals",
+                    [(journal, 6, 5)],
+                    identity_keys_by_link={journal: identity_keys(journal)},
+                ),
+                GroupPassingScores(
+                    "scanning_probe_microscopy",
+                    [(arxiv, 8, 4)],
+                    identity_keys_by_link={arxiv: identity_keys(arxiv, en)},
+                ),
+            ]
+        )
+        self.assertEqual(winners[normalize_link(journal)], "scanning_probe_microscopy")
+        self.assertEqual(winners[normalize_link(arxiv)], "scanning_probe_microscopy")
+        items_j = [self._item(journal)]
+        items_a = [self._item(arxiv)]
+        self.assertEqual(
+            filter_feed_items_for_group(items_j, "acs_journals", winners), []
+        )
+        self.assertEqual(
+            len(filter_feed_items_for_group(items_a, "scanning_probe_microscopy", winners)),
+            1,
+        )
+
     def test_uncontested_persisted_link_stays(self) -> None:
         url = "https://arxiv.org/abs/old"
         items = [self._item(url)]

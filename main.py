@@ -46,6 +46,13 @@ from kagi_quota import (
     remaining_kagi_invocations,
     reset_kagi_session_quota,
 )
+from paper_identity import identity_keys
+from seen_articles import (
+    SeenArticlesCorruptError,
+    load_seen_articles,
+    save_seen_articles,
+    seen_articles_path,
+)
 from rss_merge import (
     FeedItem,
     GroupPassingScores,
@@ -227,6 +234,7 @@ def _legacy_group(cfg: dict) -> dict:
         "concurrent_requests": cfg.get("concurrent_requests"),
         "crawl_abstract": cfg.get("crawl_abstract", False),
         "zulip_sources": cfg.get("zulip_sources", []),
+        "method_include": list(cfg.get("method_include") or []),
     }
 
 
@@ -264,6 +272,7 @@ def expand_groups(cfg: dict) -> list[dict]:
                 "zulip_sources": g.get("zulip_sources", []),
                 "prefilter_max_candidates": g.get("prefilter_max_candidates"),
                 "scoring_batch_size": g.get("scoring_batch_size"),
+                "method_include": list(g.get("method_include") or []),
             }
             groups.append(entry)
         return groups
@@ -326,6 +335,49 @@ class GroupRunResult:
     n_scored: int
     link_scores: list[tuple[str, int, int]]
     feedback: GroupFeedbackCandidates | None
+    considered_keys: set[str]
+    identity_keys_by_link: dict[str, set[str]]
+
+
+def llm_score_failed(reply: Reply) -> bool:
+    reason = reply.reason or ""
+    if reason in {
+        "batch parse miss and fallback failed",
+        "missing reply",
+        "decode error",
+    }:
+        return True
+    return "fallback failed" in reason
+
+
+def fetch_group_articles(group: dict, *, crawl_abstract: bool = False) -> list[ArticleInfo]:
+    """All current RSS entries for a group (no recency window)."""
+    recent_articles: list[ArticleInfo] = []
+    article_titles: list[str] = []
+    crawlers = []
+    group_name = group.get("name", "unnamed")
+    with ThreadPoolExecutor() as pool:
+        for url in group["urls"]:
+            n_article = 0
+            try:
+                rss_adapter = RSSAdapter(url)
+                for article in rss_adapter.recent_articles(hours=None):
+                    if article.title not in article_titles:
+                        article_titles.append(article.title)
+                        recent_articles.append(article)
+                        if crawl_abstract:
+                            crawlers.append(
+                                pool.submit(rss_adapter.crawl_abstract, article=article)
+                            )
+                        n_article += 1
+            except Exception:
+                logger.exception(
+                    "RSS fetch failed url=%s group=%s", url, group_name
+                )
+            print(f"{n_article} articles to process on {url}.")
+    for crawler in tqdm(crawlers, desc="waiting for crawlers"):
+        crawler.result()
+    return recent_articles
 
 
 def _write_group_rss(
@@ -445,6 +497,7 @@ def process_group(
     openrouter: OpenRouterClient | None = None,
     route_to_openrouter: list[str] | None = None,
     author_whitelist: "AuthorWhitelist | None" = None,
+    seen_keys: set[str] | None = None,
 ) -> GroupRunResult:
     rss_path = group["rss_path"]
     feed_link = str(group.get("feed_link", "myserver"))
@@ -513,26 +566,21 @@ def process_group(
 
             # Journal suggestions are merged into config.toml once per run (see main()).
 
-    rss_urls = group["urls"]
     rss_max_items = group["rss_max_items"]
-    recent_articles: list[ArticleInfo] = []
-    article_titles: list[str] = []
-    crawlers = []
-    with ThreadPoolExecutor() as pool:
-        for url in rss_urls:
-            rss_adapter = RSSAdapter(url)
-            n_article = 0
-            for article in rss_adapter.recent_articles(hours=period):
-                if article.title not in article_titles:
-                    article_titles.append(article.title)
-                    recent_articles.append(article)
-                    if crawl_abstract:
-                        crawlers.append(pool.submit(rss_adapter.crawl_abstract, article=article))
-                    n_article += 1
-            print(f"{n_article} articles to process on {url}.")
-
-    for crawler in tqdm(crawlers, desc="waiting for crawlers"):
-        crawler.result()
+    recent_articles = fetch_group_articles(group, crawl_abstract=crawl_abstract)
+    n_feed = len(recent_articles)
+    if seen_keys:
+        recent_articles = [
+            art
+            for art in recent_articles
+            if not (identity_keys(str(art.link)) & seen_keys)
+        ]
+        logger.info(
+            "[%s] unseen %d/%d feed items",
+            group_name,
+            len(recent_articles),
+            n_feed,
+        )
 
     cap = int(group.get("prefilter_max_candidates") or kagi_prefilter_cap)
     bsz = int(group.get("scoring_batch_size") or kagi_batch_size)
@@ -746,6 +794,17 @@ def process_group(
 
     link_scores = [(str(a.link), r.relevance, r.impact) for a, r in passing]
 
+    considered_keys: set[str] = set()
+    identity_keys_by_link: dict[str, set[str]] = {}
+    for article, reply in zip(recent_articles, replies):
+        if llm_score_failed(reply):
+            continue
+        en = enrichment_by_link.get(str(article.link))
+        keys = identity_keys(str(article.link), en)
+        considered_keys |= keys
+        identity_keys_by_link[str(article.link)] = keys
+        identity_keys_by_link[normalize_link(str(article.link))] = keys
+
     return GroupRunResult(
         group_name=group_name,
         rss_path=rss_path,
@@ -756,6 +815,8 @@ def process_group(
         n_scored=len(recent_articles),
         link_scores=link_scores,
         feedback=feedback_batch,
+        considered_keys=considered_keys,
+        identity_keys_by_link=identity_keys_by_link,
     )
 
 
@@ -854,6 +915,27 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                 except Exception:
                     logger.exception("[author-whitelist] bot poll failed")
 
+        seen_path = seen_articles_path(config_path)
+        try:
+            seen_keys, bootstrap = load_seen_articles(seen_path)
+        except SeenArticlesCorruptError as e:
+            logger.error("%s", e)
+            return
+
+        if bootstrap:
+            pending: set[str] = set()
+            for group in groups:
+                print(f"--- Group: {group['name']} (seen-set bootstrap) ---")
+                for art in fetch_group_articles(group, crawl_abstract=False):
+                    pending |= identity_keys(str(art.link))
+            if not dryrun:
+                save_seen_articles(seen_path, pending)
+            logger.info(
+                "Bootstrapped seen set with %d key(s); skipping scoring this run",
+                len(pending),
+            )
+            return
+
         # Per-group index -> untracked venues from that group's Zulip pulls (for config.toml updates).
         suggestions_by_group_idx: dict[int, dict[str, dict[str, VenueBucket]]] = {}
         zulip_plain_block_by_group_idx: dict[int, str] = {}
@@ -875,6 +957,7 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                     openrouter=openrouter,
                     route_to_openrouter=route_to_openrouter,
                     author_whitelist=author_whitelist,
+                    seen_keys=seen_keys,
                 )
             )
 
@@ -906,7 +989,9 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
             merge_journal_suggestion_maps(dest, missing_nested)
 
         passing_batches = [
-            GroupPassingScores(r.group_name, r.link_scores)
+            GroupPassingScores(
+                r.group_name, r.link_scores, r.identity_keys_by_link
+            )
             for r in group_runs
             if r.link_scores
         ]
@@ -962,6 +1047,18 @@ def main(config_path: Path = Path("config.toml"), dryrun: bool = False) -> None:
                     dryrun,
                     single_author_impact_penalty=batch.single_author_impact_penalty,
                 )
+
+        merged_seen = set(seen_keys)
+        for run in group_runs:
+            merged_seen |= run.considered_keys
+        if not dryrun:
+            save_seen_articles(seen_path, merged_seen)
+        else:
+            logger.info(
+                "[dry run] would write %d seen article key(s) to %s",
+                len(merged_seen),
+                seen_path,
+            )
 
         # One journal-domain filter for the run, then merge feeds + curated lists into config.toml.
         if suggestions_by_group_idx and kagi:

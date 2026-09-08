@@ -148,6 +148,10 @@ excluded_areas = [
     "fusion plasma physics",
 ]
 period = 24
+# `period` is the feedback-control lookback (hours), not an RSS eligibility window.
+# Every item still in a feed is eligible until it is in the seen-set
+# (`<config-stem>.seen_articles.json`). Optional method phrases are always scored:
+# method_include = ["STM", "scanning tunneling", "ncAFM", "qPlus", "scanning probe"]
 rss_path = "data/cm_physics.xml"
 relevance_threshold = 5
 impact_threshold = 3
