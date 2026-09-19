@@ -61,6 +61,28 @@ class TestZulipJournalSuggestionsLogic(unittest.TestCase):
         missing = missing_domain_counts(tracked_domains=tracked, zulip_domain_counts=counts)
         self.assertEqual(missing, {"science.org": 2})
 
+    def test_denylist_drops_search_and_identifier_hosts(self) -> None:
+        msgs = [
+            {"content": "https://google.com/search?q=paper"},
+            {"content": "https://orcid.org/0000-0002-5861-7056"},
+            {"content": "https://scholar.google.com/citations?user=x"},
+            {"content": "https://www.science.org/doi/10.1/abc"},
+        ]
+        counts = domain_counts_from_zulip_messages(msgs, denylist=DEFAULT_DOMAIN_DENYLIST)
+        self.assertNotIn("google.com", counts)
+        self.assertNotIn("orcid.org", counts)
+        self.assertNotIn("scholar.google.com", counts)
+        self.assertEqual(counts.get("science.org"), 1)
+
+        nested = missing_venues_by_section_from_messages(
+            msgs, tracked_venue_keys=set(), denylist=DEFAULT_DOMAIN_DENYLIST
+        )
+        apex = apex_domains_from_nested(nested)
+        self.assertNotIn("google.com", apex)
+        self.assertNotIn("orcid.org", apex)
+        self.assertNotIn("scholar.google.com", apex)
+        self.assertIn("science.org", apex)
+
     def test_format_message_contains_domains(self) -> None:
         body = format_missing_journals_message({"science.org": 2, "cell.com": 1})
         self.assertIn("science.org", body)
@@ -181,6 +203,37 @@ class TestZulipJournalSuggestionsLogic(unittest.TestCase):
         kept, reasons = filter_academic_journal_domains_with_kagi(FakeKagi(), ["science.org"])
         self.assertEqual(kept, [])
         self.assertEqual(reasons, {})
+
+    def test_kagi_filter_parsed_empty_allowlist_is_info_not_warning(self) -> None:
+        class FakeKagi:
+            def fastgpt_query(self, _prompt: str) -> str:
+                return (
+                    "```json\n"
+                    '{"academic_domains":[],"reasons":{"google.com":"search engine"}}\n'
+                    "```"
+                )
+
+        with self.assertLogs("zulip_journal_suggestions", level="INFO") as cm:
+            kept, reasons = filter_academic_journal_domains_with_kagi(
+                FakeKagi(), ["google.com"]
+            )
+        self.assertEqual(kept, [])
+        self.assertEqual(reasons, {})
+        self.assertTrue(any("empty academic allowlist" in line for line in cm.output))
+        self.assertFalse(any(line.startswith("WARNING:") for line in cm.output))
+
+    def test_kagi_filter_unparseable_output_is_warning(self) -> None:
+        class FakeKagi:
+            def fastgpt_query(self, _prompt: str) -> str:
+                return "sorry, I cannot do that"
+
+        with self.assertLogs("zulip_journal_suggestions", level="WARNING") as cm:
+            kept, reasons = filter_academic_journal_domains_with_kagi(
+                FakeKagi(), ["science.org"]
+            )
+        self.assertEqual(kept, [])
+        self.assertEqual(reasons, {})
+        self.assertTrue(any("parse miss" in line for line in cm.output))
 
     def test_new_feed_urls_orders_by_count_skips_existing(self) -> None:
         nested = {

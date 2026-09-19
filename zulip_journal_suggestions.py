@@ -26,7 +26,7 @@ UNKNOWN_ZULIP_SECTION = "(unknown section)"
 # Max venues listed per Zulip section before collapsing the rest.
 MAX_VENUES_PER_SECTION = 15
 
-# Not journals; common link routers / social / aggregators.
+# Not journals: preprint/DOI routers, social, aggregators, search, identifiers.
 DEFAULT_DOMAIN_DENYLIST: set[str] = {
     "arxiv.org",
     "doi.org",
@@ -38,6 +38,9 @@ DEFAULT_DOMAIN_DENYLIST: set[str] = {
     "reddit.com",
     "github.com",
     "youtube.com",
+    "google.com",
+    "scholar.google.com",
+    "orcid.org",
 }
 
 
@@ -156,11 +159,16 @@ def filter_nested_by_allowed_domains(
     return out
 
 
-def _parse_kagi_journal_domain_filter_response(text: str) -> tuple[set[str], dict[str, str]]:
-    """Parse FastGPT JSON response into (allowed_domains, reason_by_domain)."""
+def _parse_kagi_journal_domain_filter_response(
+    text: str,
+) -> tuple[set[str], dict[str, str]] | None:
+    """Parse FastGPT JSON response into (allowed_domains, reason_by_domain).
+
+    Returns None when the model output is not a JSON object.
+    """
     obj = try_load_json_object_from_llm(text or "")
     if not isinstance(obj, dict):
-        return set(), {}
+        return None
 
     allowed_raw = obj.get("academic_domains") or []
     if not isinstance(allowed_raw, list):
@@ -215,10 +223,19 @@ def _filter_academic_journal_domains_from_llm_output(
         logger.warning("%s journal-domain filter returned empty output", provider_label)
         return [], {}
 
-    allowed, reasons = _parse_kagi_journal_domain_filter_response(text)
-    if not allowed:
+    parsed = _parse_kagi_journal_domain_filter_response(text)
+    if parsed is None:
         logger.warning(
-            "%s journal-domain filter parse miss or empty allowlist; snippet=%s",
+            "%s journal-domain filter parse miss; snippet=%s",
+            provider_label,
+            (text or "")[:400],
+        )
+        return [], {}
+
+    allowed, reasons = parsed
+    if not allowed:
+        logger.info(
+            "%s journal-domain filter: empty academic allowlist; snippet=%s",
             provider_label,
             (text or "")[:400],
         )
