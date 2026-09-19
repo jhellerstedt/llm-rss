@@ -4,12 +4,14 @@ from pathlib import Path
 
 from zulip_feedback_weekly_stats import (
     aggregate_votes_for_stream,
+    category_by_group_from_cfg,
     collect_stats_by_bucket,
     feedback_weekly_stats_path,
     load_stats,
     markdown_stats_only,
     record_enqueued,
     record_posted,
+    remap_counters_to_categories,
     reset_period_after_summary,
     resolve_bucket,
     save_stats,
@@ -133,6 +135,110 @@ class TestRecordAndReset(unittest.TestCase):
         )
         path = feedback_weekly_stats_path(self.cfg_path, self.zulip_cfg)
         self.assertFalse(path.exists())
+
+
+class TestCategoryRemap(unittest.TestCase):
+    def test_map_from_config_groups(self) -> None:
+        cfg = {
+            "groups": [
+                {"name": "quantum_computing", "feed_category": "quantum hardware"},
+                {"name": "aps_journals", "category": "nano"},
+                {"name": "solo"},
+            ]
+        }
+        self.assertEqual(
+            category_by_group_from_cfg(cfg),
+            {"quantum_computing": "quantum", "aps_journals": "nano"},
+        )
+
+    def test_group_bucket_posted_merges_into_category(self) -> None:
+        counters = [
+            {
+                "realm": "tuesday",
+                "stream": "science",
+                "bucket_id": "c:quantum",
+                "title": "quantum",
+                "kind": "category",
+                "enqueued": 9,
+                "posted": 0,
+            },
+            {
+                "realm": "tuesday",
+                "stream": "science",
+                "bucket_id": "g:quantum_computing",
+                "title": "quantum_computing",
+                "kind": "group",
+                "enqueued": 0,
+                "posted": 3,
+            },
+        ]
+        merged = remap_counters_to_categories(
+            counters, {"quantum_computing": "quantum"}
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["bucket_id"], "c:quantum")
+        self.assertEqual(merged[0]["enqueued"], 9)
+        self.assertEqual(merged[0]["posted"], 3)
+        by = collect_stats_by_bucket(merged, {"c:quantum": (2, 1)})
+        md = markdown_stats_only(by)
+        self.assertIn("**Queued:** 9", md)
+        self.assertIn("**Posted:** 3", md)
+        self.assertIn("**Votes:** ↑2 / ↓1", md)
+
+
+class TestVoteJoin(unittest.TestCase):
+    def test_arxiv_body_matches_journal_event_via_alias(self) -> None:
+        events = [
+            {
+                "link": "https://www.nature.com/articles/s41467-026-77618-6",
+                "aliases": ["https://arxiv.org/abs/2506.21963"],
+                "bucket_id": "c:nano",
+                "realm": "tuesday",
+                "stream": "science",
+                "ts": 1000.0,
+            }
+        ]
+        msgs = [
+            {
+                "timestamp": 1010.0,
+                "content": "Paper\n\nLink: https://arxiv.org/abs/2506.21963",
+                "reactions": [{"emoji_name": "+1"}],
+            }
+        ]
+        votes = aggregate_votes_for_stream(
+            msgs,
+            events,
+            realm="tuesday",
+            stream="science",
+            period_start_unix=0,
+        )
+        self.assertEqual(votes["c:nano"], (1, 0))
+
+    def test_arxiv_body_matches_journal_event_by_nearby_timestamp(self) -> None:
+        events = [
+            {
+                "link": "https://www.nature.com/articles/s41467-026-77618-6",
+                "bucket_id": "c:nano",
+                "realm": "tuesday",
+                "stream": "science",
+                "ts": 1000.0,
+            }
+        ]
+        msgs = [
+            {
+                "timestamp": 1002.0,
+                "content": "Paper\n\nLink: https://arxiv.org/abs/2506.21963",
+                "reactions": [{"emoji_name": "-1"}],
+            }
+        ]
+        votes = aggregate_votes_for_stream(
+            msgs,
+            events,
+            realm="tuesday",
+            stream="science",
+            period_start_unix=0,
+        )
+        self.assertEqual(votes["c:nano"], (0, 1))
 
 
 if __name__ == "__main__":

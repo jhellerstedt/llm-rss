@@ -435,6 +435,63 @@ class TestDispatchQueue(unittest.TestCase):
         after = json.loads(qpath.read_text(encoding="utf-8"))
         self.assertEqual(after["queues"], [])
 
+    def test_legacy_queue_item_records_posted_under_group_feed_category(self) -> None:
+        next_url = "https://www.nature.com/articles/s41467-026-77618-6"
+        qpath = feedback_ranking_queue_path(self.cfg_path, {})
+        doc = {
+            "version": 1,
+            "queues": [
+                {
+                    "realm": "tuesday",
+                    "stream": "science",
+                    "pending": [
+                        {
+                            "title": "P",
+                            "link": next_url,
+                            "enrichment": {
+                                "arxiv_url": "https://arxiv.org/abs/2506.21963",
+                            },
+                            "group_name": "quantum_computing",
+                        }
+                    ],
+                }
+            ],
+        }
+        qpath.write_text(json.dumps(doc), encoding="utf-8")
+        cfg = {
+            "groups": [
+                {
+                    "name": "quantum_computing",
+                    "feed_category": "quantum",
+                    "zulip_sources": [
+                        {"realm": "tuesday", "stream": "science", "lookback_hours": 24}
+                    ],
+                }
+            ]
+        }
+        fake_client = MagicMock()
+        fake_client.send_message.return_value = {"result": "success"}
+        with patch(
+            "zulip_feedback_queue.fetch_messages_narrow", return_value=[]
+        ), patch(
+            "zulip_feedback_queue._client_for_realm", return_value=fake_client
+        ):
+            dispatch_feedback_ranking_queue_once(
+                self.cfg_path, cfg, {"tuesday": {}}, dryrun=False
+            )
+        from zulip_feedback_weekly_stats import feedback_weekly_stats_path, load_stats
+
+        stats = load_stats(feedback_weekly_stats_path(self.cfg_path, {}))
+        self.assertEqual(len(stats["counters"]), 1)
+        self.assertEqual(stats["counters"][0]["bucket_id"], "c:quantum")
+        self.assertEqual(stats["counters"][0]["posted"], 1)
+        event = stats["posted_events"][0]
+        self.assertIn("2506.21963", event["link"])
+        aliases = event.get("aliases") or []
+        self.assertTrue(
+            any("s41467-026-77618-6" in str(a) for a in [event["link"], *aliases])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

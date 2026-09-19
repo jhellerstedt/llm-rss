@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from paper_identity import identity_keys
 from rss_merge import normalize_link
 from zulip_feedback import (
     count_thumbs_reactions,
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 STATS_VERSION = 1
 MAX_POSTED_EVENTS = 2000
 EVENT_RETENTION_PAD_SEC = 7 * 24 * 3600
+# Join a Zulip reaction to a posted_event when the body URL was rewritten (e.g. arXiv)
+# and no alias was stored. One post per stream per hour, so a 3-minute window is ample.
+VOTE_TS_MATCH_SEC = 180.0
 
 
 def feedback_weekly_stats_path(config_path: Path, zulip_cfg: dict[str, Any] | None = None) -> Path:
@@ -40,6 +44,98 @@ def resolve_bucket(group_name: str, feed_category: str | None) -> tuple[str, str
         return f"c:{token}", token, "category"
     name = str(group_name or "unnamed").strip() or "unnamed"
     return f"g:{name}", name, "group"
+
+
+def category_by_group_from_cfg(cfg: dict[str, Any] | None) -> dict[str, str]:
+    """Map config group name -> first-token feed_category."""
+    out: dict[str, str] = {}
+    if not cfg:
+        return out
+    for g in cfg.get("groups") or []:
+        if not isinstance(g, dict):
+            continue
+        name = str(g.get("name") or "").strip()
+        raw = g.get("feed_category") or g.get("category")
+        token = str(raw or "").strip().split()[0] if raw else ""
+        if name and token:
+            out[name] = token
+    return out
+
+
+def canonicalize_bucket_id(
+    bucket_id: str,
+    category_by_group: dict[str, str],
+    *,
+    group_name: str | None = None,
+) -> tuple[str, str, str]:
+    """Prefer ``c:{feed_category}`` when a group-name bucket can be remapped."""
+    bid = str(bucket_id or "")
+    if bid.startswith("c:") and len(bid) > 2:
+        title = bid[2:]
+        return bid, title, "category"
+    name = str(group_name or "").strip()
+    if not name and bid.startswith("g:"):
+        name = bid[2:]
+    cat = category_by_group.get(name) if name else None
+    if cat:
+        return f"c:{cat}", cat, "category"
+    if bid.startswith("g:") and len(bid) > 2:
+        return bid, bid[2:], "group"
+    return resolve_bucket(name or bid or "unnamed", None)
+
+
+def remap_counters_to_categories(
+    counters: list[dict[str, Any]],
+    category_by_group: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Merge ``g:{group}`` rows into ``c:{category}`` when the group has a feed_category."""
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str, str]] = []
+    for row in counters:
+        if not isinstance(row, dict):
+            continue
+        bid, title, kind = canonicalize_bucket_id(
+            str(row.get("bucket_id") or ""),
+            category_by_group,
+            group_name=str(row.get("group_name") or "") or None,
+        )
+        key = (
+            str(row.get("realm", "")).lower(),
+            str(row.get("stream", "")),
+            bid,
+        )
+        if key not in merged:
+            new_row = dict(row)
+            new_row["bucket_id"] = bid
+            new_row["title"] = title
+            new_row["kind"] = kind
+            new_row["enqueued"] = int(row.get("enqueued") or 0)
+            new_row["posted"] = int(row.get("posted") or 0)
+            merged[key] = new_row
+            order.append(key)
+        else:
+            merged[key]["enqueued"] += int(row.get("enqueued") or 0)
+            merged[key]["posted"] += int(row.get("posted") or 0)
+    return [merged[k] for k in order]
+
+
+def remap_posted_event_buckets(
+    events: list[dict[str, Any]],
+    category_by_group: dict[str, str],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        ev = dict(ev)
+        bid, _, _ = canonicalize_bucket_id(
+            str(ev.get("bucket_id") or ""),
+            category_by_group,
+            group_name=str(ev.get("group_name") or "") or None,
+        )
+        ev["bucket_id"] = bid
+        out.append(ev)
+    return out
 
 
 def _default_doc(*, period_start: float | None = None) -> dict[str, Any]:
@@ -152,6 +248,7 @@ def record_posted(
     link: str,
     dryrun: bool,
     ts: float | None = None,
+    aliases: list[str] | None = None,
 ) -> None:
     if dryrun:
         return
@@ -167,15 +264,24 @@ def record_posted(
         if not isinstance(events, list):
             events = []
             doc["posted_events"] = events
-        events.append(
-            {
-                "link": normalize_link(link),
-                "bucket_id": bucket_id,
-                "realm": str(realm).lower(),
-                "stream": str(stream),
-                "ts": now,
-            }
-        )
+        primary = normalize_link(link)
+        extra: list[str] = []
+        seen = {primary} if primary else set()
+        for a in aliases or []:
+            n = normalize_link(str(a))
+            if n and n not in seen:
+                seen.add(n)
+                extra.append(n)
+        event: dict[str, Any] = {
+            "link": primary,
+            "bucket_id": bucket_id,
+            "realm": str(realm).lower(),
+            "stream": str(stream),
+            "ts": now,
+        }
+        if extra:
+            event["aliases"] = extra
+        events.append(event)
         _trim_posted_events(doc)
         save_stats(path, doc)
     except Exception:
@@ -245,6 +351,25 @@ def counters_for_stream(
     return out
 
 
+def _event_urls(ev: dict[str, Any]) -> set[str]:
+    urls: set[str] = set()
+    primary = normalize_link(str(ev.get("link") or ""))
+    if primary:
+        urls.add(primary)
+    for a in ev.get("aliases") or []:
+        n = normalize_link(str(a))
+        if n:
+            urls.add(n)
+    return urls
+
+
+def _identity_keys_for_urls(urls: set[str]) -> set[str]:
+    keys: set[str] = set()
+    for u in urls:
+        keys |= identity_keys(u)
+    return keys
+
+
 def aggregate_votes_for_stream(
     messages: list[dict[str, Any]],
     posted_events: list[dict[str, Any]],
@@ -255,31 +380,73 @@ def aggregate_votes_for_stream(
 ) -> dict[str, tuple[int, int]]:
     """Map bucket_id -> (up, down) for reacted bot posts in this stream/period."""
     r = realm.lower()
-    link_to_bucket: dict[str, str] = {}
+    events: list[dict[str, Any]] = []
+    url_to_bucket: dict[str, str] = {}
+    ident_to_bucket: dict[str, str] = {}
     for ev in posted_events:
         if not isinstance(ev, dict):
             continue
         if str(ev.get("realm", "")).lower() != r or str(ev.get("stream", "")) != stream:
             continue
-        link = normalize_link(str(ev.get("link") or ""))
         bid = str(ev.get("bucket_id") or "")
-        if link and bid:
-            link_to_bucket[link] = bid
+        if not bid:
+            continue
+        events.append(ev)
+        urls = _event_urls(ev)
+        for u in urls:
+            url_to_bucket[u] = bid
+        for k in _identity_keys_for_urls(urls):
+            ident_to_bucket[k] = bid
 
     votes: dict[str, list[int]] = {}
     cutoff = float(period_start_unix or 0.0)
+    unmatched: list[tuple[float, int, int]] = []
     for msg in messages:
-        ts = _normalize_message_ts(msg.get("timestamp") or 0)
+        ts = float(_normalize_message_ts(msg.get("timestamp") or 0))
         if cutoff and ts < cutoff:
             continue
         link = parse_feedback_link_from_body(str(msg.get("content") or ""))
         if not link:
             continue
-        bid = link_to_bucket.get(normalize_link(link))
-        if not bid:
-            continue
         up, down = count_thumbs_reactions(msg)
         if up + down <= 0:
+            continue
+        nlink = normalize_link(link)
+        bid = url_to_bucket.get(nlink)
+        if not bid:
+            for k in identity_keys(link):
+                bid = ident_to_bucket.get(k)
+                if bid:
+                    break
+        if bid:
+            cur = votes.setdefault(bid, [0, 0])
+            cur[0] += up
+            cur[1] += down
+        else:
+            unmatched.append((ts, up, down))
+
+    unused = list(events)
+    for ts, up, down in unmatched:
+        best_ev: dict[str, Any] | None = None
+        best_dt: float | None = None
+        for ev in unused:
+            try:
+                ev_ts = float(ev.get("ts") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if ev_ts <= 0:
+                continue
+            dt = abs(ev_ts - ts)
+            if dt > VOTE_TS_MATCH_SEC:
+                continue
+            if best_dt is None or dt < best_dt:
+                best_dt = dt
+                best_ev = ev
+        if best_ev is None:
+            continue
+        unused = [ev for ev in unused if ev is not best_ev]
+        bid = str(best_ev.get("bucket_id") or "")
+        if not bid:
             continue
         cur = votes.setdefault(bid, [0, 0])
         cur[0] += up

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from api_usage import record_zulip_api
-from openalex_enrich import PaperEnrichment
+from openalex_enrich import PaperEnrichment, preferred_public_link
 from rss_merge import normalize_link
 from zulip_context import fetch_messages_narrow, _client_for_realm
 from zulip_feedback import (
@@ -24,7 +24,13 @@ from zulip_feedback import (
     lookback_max_for_pair,
     unique_realm_stream_pairs,
 )
-from zulip_feedback_weekly_stats import record_enqueued, record_posted, resolve_bucket
+from zulip_feedback_weekly_stats import (
+    canonicalize_bucket_id,
+    category_by_group_from_cfg,
+    record_enqueued,
+    record_posted,
+    resolve_bucket,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +356,7 @@ def dispatch_feedback_ranking_queue_once(
     if not zulip_sources_all:
         logger.debug("No zulip_sources in config; skipping feedback queue dispatch")
         return
+    cat_map = category_by_group_from_cfg(cfg)
 
     with _locked_queue_file(path) as doc:
         by_pair = _doc_to_by_pair(doc)
@@ -367,11 +374,15 @@ def dispatch_feedback_ranking_queue_once(
             )
             cand_group = str(cand.get("group_name") or "uncategorized")
             if cand.get("bucket_id") and cand.get("bucket_title") and cand.get("kind"):
-                cand_bid = str(cand["bucket_id"])
-                cand_btitle = str(cand["bucket_title"])
-                cand_bkind = str(cand["kind"])
+                cand_bid, cand_btitle, cand_bkind = canonicalize_bucket_id(
+                    str(cand["bucket_id"]),
+                    cat_map,
+                    group_name=cand_group if cand_group != "uncategorized" else None,
+                )
             else:
-                cand_bid, cand_btitle, cand_bkind = resolve_bucket(cand_group, None)
+                cand_bid, cand_btitle, cand_bkind = resolve_bucket(
+                    cand_group, cat_map.get(cand_group)
+                )
             lookback, max_msg = lookback_max_for_pair(zulip_sources_all, realm, stream)
             try:
                 client = _client_for_realm(zulip_realms, realm)
@@ -460,6 +471,10 @@ def dispatch_feedback_ranking_queue_once(
                     continue
                 record_zulip_api(1)
                 by_pair[(realm, stream)] = pending[1:]
+                public = preferred_public_link(link, en)
+                aliases = [link, public]
+                if en is not None and en.arxiv_url:
+                    aliases.append(str(en.arxiv_url))
                 record_posted(
                     config_path,
                     zulip_cfg,
@@ -468,8 +483,9 @@ def dispatch_feedback_ranking_queue_once(
                     bucket_id=cand_bid,
                     title=cand_btitle,
                     kind=cand_bkind,
-                    link=link,
+                    link=public,
                     dryrun=False,
+                    aliases=aliases,
                 )
                 logger.info(
                     "Feedback queue: posted realm=%s stream=%s link=%s",

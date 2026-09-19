@@ -13,11 +13,14 @@ from zulip_context import _client_for_realm, fetch_messages_narrow
 from zulip_feedback import FEEDBACK_RANKING_TOPIC, unique_realm_stream_pairs
 from zulip_feedback_weekly_stats import (
     aggregate_votes_for_stream,
+    category_by_group_from_cfg,
     collect_stats_by_bucket,
     counters_for_stream,
     format_stats_bullets,
     load_stats,
     feedback_weekly_stats_path,
+    remap_counters_to_categories,
+    remap_posted_event_buckets,
     reset_period_after_summary,
 )
 
@@ -440,16 +443,25 @@ def _stats_by_bucket_for_stream(
     stream: str,
     allowed_bucket_ids: frozenset[str] | None,
     period_start_unix: float,
+    cfg: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load period counters + votes for one stream; empty dict on failure."""
     try:
+        cat_map = category_by_group_from_cfg(cfg)
         stats_doc = load_stats(feedback_weekly_stats_path(config_path, zulip_cfg))
-        counters = counters_for_stream(
-            stats_doc,
-            realm=realm,
-            stream=stream,
-            allowed_bucket_ids=allowed_bucket_ids,
+        counters = remap_counters_to_categories(
+            counters_for_stream(
+                stats_doc,
+                realm=realm,
+                stream=stream,
+                allowed_bucket_ids=None,
+            ),
+            cat_map,
         )
+        if allowed_bucket_ids is not None:
+            counters = [
+                row for row in counters if str(row.get("bucket_id")) in allowed_bucket_ids
+            ]
         votes: dict[str, tuple[int, int]] = {}
         try:
             client = _client_for_realm(zulip_realms, realm)
@@ -463,9 +475,13 @@ def _stats_by_bucket_for_stream(
                 lookback_hours,
                 500,
             )
+            events = remap_posted_event_buckets(
+                list(stats_doc.get("posted_events") or []),
+                cat_map,
+            )
             votes = aggregate_votes_for_stream(
                 msgs,
-                list(stats_doc.get("posted_events") or []),
+                events,
                 realm=realm,
                 stream=stream,
                 period_start_unix=float(
@@ -581,6 +597,7 @@ def maybe_post_weekly_journal_config_summary(
             stream=stream,
             allowed_bucket_ids=allowed,
             period_start_unix=period_start,
+            cfg=cfg,
         )
         stream_body = markdown_config_diff(
             snap,

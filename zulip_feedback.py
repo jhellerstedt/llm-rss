@@ -573,6 +573,7 @@ def post_feedback_ranking_for_new_items(
                 posted.update(aliases)
                 sends_left -= 1
                 if config_path is not None:
+                    public = preferred_public_link(link, enrichment)
                     record_posted(
                         Path(config_path),
                         zulip_cfg or {},
@@ -581,8 +582,17 @@ def post_feedback_ranking_for_new_items(
                         bucket_id=bid,
                         title=btitle,
                         kind=bkind,
-                        link=link,
+                        link=public,
                         dryrun=False,
+                        aliases=[
+                            link,
+                            public,
+                            *(
+                                [str(enrichment.arxiv_url)]
+                                if enrichment is not None and enrichment.arxiv_url
+                                else []
+                            ),
+                        ],
                     )
             except Exception:
                 logger.exception(
